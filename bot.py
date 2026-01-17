@@ -9,6 +9,9 @@ from database import *
 from keyboards import *
 from utils import *
 
+import os
+TOKEN = os.getenv('8443205937:AAGT7LoftJw-arONG58CcwDWXueuwbxYLps')
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
