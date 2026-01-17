@@ -9,6 +9,9 @@ from database import *
 from keyboards import *
 from utils import *
 
+import os
+TOKEN = os.getenv('"REVOKED_TOKEN_REMOVED"')
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
