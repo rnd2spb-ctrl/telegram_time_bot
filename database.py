@@ -50,6 +50,33 @@ def get_employee_by_user_id(user_id):
     return None
 
 
+def get_all_employees():
+    """Возвращает все записи сотрудников, включая неактивные."""
+    return load_json("employees.json")
+
+
+def set_employee_role(user_id, role):
+    """Меняет роль привязанного активного сотрудника без изменения остальных данных."""
+    if role not in {"employee", "admin"}:
+        return False, "invalid_role"
+
+    employees = load_json("employees.json")
+    employee = next(
+        (item for item in employees if item.get("user_id") == user_id),
+        None
+    )
+    if employee is None:
+        return False, "not_found"
+    if employee.get("status", "active") != "active":
+        return False, "inactive"
+    if employee.get("role", "employee") == role:
+        return False, "unchanged"
+
+    employee["role"] = role
+    save_json("employees.json", employees)
+    return True, "ok"
+
+
 def bind_employee_to_user(phone_number, user_id):
     """Безопасно привязывает сотрудника к Telegram ID без перезаписи чужой привязки."""
     employees = load_json("employees.json")
