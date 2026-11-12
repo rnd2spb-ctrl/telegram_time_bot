@@ -105,47 +105,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "Добро пожаловать! Для идентификации поделитесь, пожалуйста, своим номером телефона.",
+            "Добро пожаловать! Поделитесь своим контактом или введите номер в формате +7XXXXXXXXXX.",
             reply_markup=get_phone_keyboard()
         )
 
 
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик получения собственного контакта сотрудника."""
+async def complete_phone_identification(update: Update, phone_number: str):
+    """Проверяет номер и привязывает сотрудника к Telegram-аккаунту."""
     user = update.effective_user
-    contact = update.message.contact
+    employee = get_employee_by_phone(phone_number)
 
-    if not contact or contact.user_id != user.id:
-        await update.message.reply_text(
-            "Пожалуйста, отправьте именно свой номер телефона через кнопку ниже.",
-            reply_markup=get_phone_keyboard()
-        )
-        return
-
-    employee = get_employee_by_phone(contact.phone_number)
     if not employee:
         await update.message.reply_text(
-            "Извините, ваш номер телефона не найден в системе. Обратитесь к владельцу бота.",
-            reply_markup=ReplyKeyboardRemove()
+            "Номер не найден. Проверьте его или обратитесь к владельцу.",
+            reply_markup=get_phone_keyboard()
         )
         return
 
     if employee.get("status", "active") != "active" and user.id != config.OWNER_ID:
         await update.message.reply_text(
-            "❌ Ваш доступ приостановлен. Обратитесь к владельцу бота.",
+            "Доступ приостановлен. Обратитесь к владельцу.",
             reply_markup=ReplyKeyboardRemove()
         )
         return
 
-    bound, reason, employee = bind_employee_to_user(contact.phone_number, user.id)
+    bound, reason, employee = bind_employee_to_user(phone_number, user.id)
     if not bound:
         messages = {
-            "phone_already_bound": "Этот номер уже привязан к другому Telegram-аккаунту. Обратитесь к владельцу.",
-            "user_already_bound": "Ваш Telegram-аккаунт уже привязан к другой записи сотрудника. Обратитесь к владельцу.",
-            "not_found": "Сотрудник с таким номером не найден."
+            "phone_already_bound": "Этот номер уже привязан к другому аккаунту. Обратитесь к владельцу.",
+            "user_already_bound": "Ваш Telegram уже привязан к другой записи. Обратитесь к владельцу.",
+            "not_found": "Номер не найден. Проверьте его или обратитесь к владельцу."
         }
         await update.message.reply_text(
-            messages.get(reason, "Не удалось выполнить привязку. Обратитесь к владельцу."),
+            messages.get(reason, "Не удалось привязать номер. Обратитесь к владельцу."),
             reply_markup=ReplyKeyboardRemove()
         )
         return
@@ -157,6 +149,21 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик получения собственного контакта сотрудника."""
+    user = update.effective_user
+    contact = update.message.contact
+
+    if not contact or contact.user_id != user.id:
+        await update.message.reply_text(
+            "Отправьте свой контакт кнопкой «Поделиться контактом».",
+            reply_markup=get_phone_keyboard()
+        )
+        return
+
+    await complete_phone_identification(update, contact.phone_number)
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки главного меню."""
     text = update.message.text
@@ -165,9 +172,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = get_user_role(user.id)
 
     if role is None:
-        await update.message.reply_text(
-            "Сначала пройдите идентификацию через /start или обратитесь к владельцу."
-        )
+        phone = text.strip()
+        if re.fullmatch(r"\+7\d{10}", phone):
+            await complete_phone_identification(update, phone)
+        else:
+            await update.message.reply_text(
+                "Поделитесь своим контактом или введите номер в формате +7XXXXXXXXXX.",
+                reply_markup=get_phone_keyboard()
+            )
         return
 
     if text == "Начать смену":

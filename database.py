@@ -34,10 +34,16 @@ def save_json(filename, data):
 
 
 # Функции для работы с сотрудниками
+def normalize_phone(phone_number):
+    """Оставляет в номере только цифры для сравнения разных форматов записи."""
+    return "".join(char for char in str(phone_number or "") if char.isdigit())
+
+
 def get_employee_by_phone(phone_number):
     employees = load_json("employees.json")
+    normalized_phone = normalize_phone(phone_number)
     for employee in employees:
-        if employee.get("phone_number") == phone_number:
+        if normalize_phone(employee.get("phone_number")) == normalized_phone:
             return employee
     return None
 
@@ -80,9 +86,10 @@ def set_employee_role(user_id, role):
 def bind_employee_to_user(phone_number, user_id):
     """Безопасно привязывает сотрудника к Telegram ID без перезаписи чужой привязки."""
     employees = load_json("employees.json")
+    normalized_phone = normalize_phone(phone_number)
     target = next(
         (employee for employee in employees
-         if employee.get("phone_number") == phone_number),
+         if normalize_phone(employee.get("phone_number")) == normalized_phone),
         None
     )
     if target is None:

@@ -31,7 +31,7 @@ def get_dialog_keyboard():
 def get_phone_keyboard():
     """Клавиатура для запроса номера телефона."""
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("Поделиться номером телефона", request_contact=True)]],
+        [[KeyboardButton("Поделиться контактом", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
