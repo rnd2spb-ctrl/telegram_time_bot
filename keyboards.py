@@ -30,6 +30,7 @@ def get_employee_management_keyboard(is_owner=False):
     ]
     if is_owner:
         buttons.append([KeyboardButton("Назначить/снять администратора")])
+        buttons.append([KeyboardButton("Отвязать аккаунт")])
     buttons.append([KeyboardButton(BACK_BUTTON)])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 ADD_EMPLOYEE, GET_NAME, GET_SCHEDULE_DATE, GET_SCHEDULE_EMPLOYEE, GET_SCHEDULE_TIME, EDIT_EMPLOYEE_SELECT, EDIT_EMPLOYEE_ROLE, MANAGE_EMPLOYEE_SELECT, MANAGE_EMPLOYEE_NAME, MANAGE_EMPLOYEE_CONFIRM, MANAGE_EMPLOYEE_PHONE = range(11)
 SCHEDULE_MENU, SCHEDULE_SELECT_ENTRY, SCHEDULE_END_TIME, SCHEDULE_DELETE_CONFIRM = range(11, 15)
 SCHEDULE_DELETE_INVALID_SELECT, SCHEDULE_DELETE_INVALID_CONFIRM = range(15, 17)
+UNLINK_EMPLOYEE_SELECT, UNLINK_EMPLOYEE_CONFIRM = 100, 101
 
 # --- Состояние диалогов и общие подписи ---
 def clear_schedule_state(context):
@@ -22,7 +23,7 @@ def clear_schedule_state(context):
     for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_selected_ids', 'schedule_delete_employee_options', 'schedule_delete_employee', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
         context.user_data.pop(key, None)
 
-MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Новая ссылка', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
+MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Новая ссылка', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отвязать аккаунт', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
 MENU_BUTTON_PATTERN = '^(?:' + '|'.join((re.escape(label) for label in MENU_BUTTONS)) + ')$'
 
 
@@ -259,6 +260,75 @@ async def contact_not_supported(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f'Контакт больше не используется для входа. {NEED_INVITE_TEXT}', reply_markup=ReplyKeyboardRemove())
     else:
         await update.message.reply_text('Контакт больше не используется. Вход в бота выполняется только по ссылке-приглашению.')
+
+async def unlink_employee_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if get_user_role(update.effective_user.id) != 'owner':
+        await update.message.reply_text('❌ Недостаточно прав.')
+        return ConversationHandler.END
+    value = update.message.text.strip()
+    if not value.isdigit():
+        await update.message.reply_text('Введите номер из списка.')
+        return UNLINK_EMPLOYEE_SELECT
+    candidates = context.user_data.get('unlink_candidates', [])
+    number = int(value)
+    if not 1 <= number <= len(candidates):
+        await update.message.reply_text('Введите корректный номер из списка.')
+        return UNLINK_EMPLOYEE_SELECT
+    context.user_data['unlink_phone'] = candidates[number - 1].get('phone_number')
+    await update.message.reply_text('Отвязать аккаунт? Введите 1 для подтверждения или 2 для отмены.', reply_markup=get_dialog_keyboard())
+    return UNLINK_EMPLOYEE_CONFIRM
+
+async def unlink_employee_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if get_user_role(update.effective_user.id) != 'owner':
+        await update.message.reply_text('❌ Недостаточно прав.')
+        return ConversationHandler.END
+    choice = update.message.text.strip()
+    if choice not in {'1', '2'}:
+        await update.message.reply_text('Введите 1 для подтверждения или 2 для отмены.')
+        return UNLINK_EMPLOYEE_CONFIRM
+    if choice == '2':
+        context.user_data.pop('unlink_phone', None)
+        context.user_data.pop('unlink_candidates', None)
+        await update.message.reply_text('Операция отменена.', reply_markup=get_employee_management_keyboard(True))
+        return ConversationHandler.END
+    phone = context.user_data.get('unlink_phone')
+    employee = get_employee_by_phone(phone)
+    name = full_name_of(employee) if employee else phone
+    ok, reason = unbind_employee(phone, protected_user_id=config.OWNER_ID)
+    if not ok:
+        messages = {'not_found': '❌ Запись не найдена.', 'protected': '❌ Нельзя отвязать запись владельца.', 'not_bound': '❌ Запись не была привязана.', 'storage_error': '❌ Не удалось сохранить.'}
+        message = messages.get(reason, '❌ Не удалось отвязать аккаунт.')
+        context.user_data.pop('unlink_phone', None)
+        context.user_data.pop('unlink_candidates', None)
+        await update.message.reply_text(message, reply_markup=get_employee_management_keyboard(True))
+        return ConversationHandler.END
+    audit_action(update, 'employee_unlinked', details={'employee_name': name, 'phone_number': phone})
+    token = create_invite(phone, issued_by=update.effective_user.id)
+    if token:
+        audit_action(update, 'invite_reissued', details={'employee_name': name, 'phone_number': phone, 'reason': 'unlink'})
+        message = f"✅ Аккаунт отвязан от записи {name}.\n\n" + build_invite_message(name, invite_link_for(context, token))
+    else:
+        message = f"✅ Аккаунт отвязан от записи {name}.\n⚠️ Не удалось создать новую ссылку."
+    context.user_data.pop('unlink_phone', None)
+    context.user_data.pop('unlink_candidates', None)
+    await update.message.reply_text(message, reply_markup=get_employee_management_keyboard(True))
+    return ConversationHandler.END
+
+async def unlink_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if get_user_role(update.effective_user.id) != 'owner':
+        await update.message.reply_text('❌ Только владелец может отвязывать аккаунты.')
+        return ConversationHandler.END
+    employees = [item for item in get_all_employees() if item.get('user_id') is not None and item.get('user_id') != config.OWNER_ID and item.get('status', 'active') == 'active']
+    if not employees:
+        await update.message.reply_text('Нет привязанных записей для отвязки.', reply_markup=get_employee_management_keyboard(True))
+        return ConversationHandler.END
+    context.user_data['menu_parent'] = 'employees'
+    context.user_data['unlink_candidates'] = employees
+    lines = ['Выберите запись для отвязки, введя номер из списка:']
+    for i, item in enumerate(employees, 1):
+        lines.append(f"{i}. {full_name_of(item)} — {item.get('phone_number') or '—'}")
+    await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+    return UNLINK_EMPLOYEE_SELECT
 
 # --- Команды и основное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1264,6 +1334,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('editing_employee_phone', None)
     context.user_data.pop('editing_employee_id', None)
     clear_manage_employee_state(context)
+    context.user_data.pop('unlink_candidates', None)
+    context.user_data.pop('unlink_phone', None)
     parent = context.user_data.get('menu_parent')
     if parent == 'employees' and is_admin_role(role):
         markup = get_employee_management_keyboard(role == 'owner')
@@ -1290,6 +1362,14 @@ def main():
     employee_edit_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Редактировать сотрудника|Назначить/снять администратора)$'), button_handler)], states={EDIT_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), select_employee_for_edit)], EDIT_EMPLOYEE_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), set_selected_employee_role)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     employee_management_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Изменить данные|Уволить сотрудника|Удалить сотрудника|Новая ссылка|Удалить ошибочные записи)$'), button_handler)], states={MANAGE_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_select)], MANAGE_EMPLOYEE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_name)], MANAGE_EMPLOYEE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_phone)], MANAGE_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     schedule_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Управление графиком$'), button_handler)], states={SCHEDULE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_menu_action)], SCHEDULE_SELECT_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_select_entry)], GET_SCHEDULE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_date)], GET_SCHEDULE_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_employee)], GET_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_time)], SCHEDULE_END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_end_time)], SCHEDULE_DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_delete_confirm)], SCHEDULE_DELETE_INVALID_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_select)], SCHEDULE_DELETE_INVALID_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
+    unlink_employee_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r'^Отвязать аккаунт$'), unlink_entry_point)],
+        states={
+            UNLINK_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), unlink_employee_select)],
+            UNLINK_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), unlink_employee_confirm)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)],
+    )
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('whoami', whoami))
     application.add_handler(add_employee_conv)
@@ -1297,6 +1377,7 @@ def main():
     application.add_handler(employee_management_conv)
     application.add_handler(schedule_conv)
     application.add_handler(MessageHandler(filters.CONTACT, contact_not_supported))
+    application.add_handler(unlink_employee_conv)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
     print('Бот запущен...')
     application.run_polling()

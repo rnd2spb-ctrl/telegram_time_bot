@@ -198,6 +198,37 @@ def redeem_invite(token, user_id):
     return True, "ok", dict(target)
 
 
+def unbind_employee(phone_number, protected_user_id=None):
+    """Сбрасывает привязку аккаунта для записи сотрудника.
+
+    Используется владельцем для смены аккаунта или перехваченной привязки.
+    После отвязки запись попадает в get_unlinked_employees() и готова к
+    выдаче новой ссылки через create_invite().
+    Возвращает (успех, причина). Причины: not_found / protected / not_bound.
+    """
+    employees = load_json("employees.json")
+    normalized_phone = normalize_phone(phone_number)
+    target = next(
+        (item for item in employees
+         if normalize_phone(item.get("phone_number")) == normalized_phone),
+        None
+    )
+    if target is None:
+        return False, "not_found"
+    if protected_user_id is not None and target.get("user_id") == protected_user_id:
+        return False, "protected"
+    if target.get("user_id") is None:
+        return False, "not_bound"
+    target["user_id"] = None
+    for key in ("registered_at", "invited_by", "invited_at", "invite_hash",
+                "invite_expires", "invite_issued_by", "invite_issued_at"):
+        target.pop(key, None)
+    save_json("employees.json", employees)
+    # Назначенные смены не должны оставаться за старым Telegram-аккаунтом.
+    _sync_schedule_employee(normalized_phone, target)
+    return True, "ok"
+
+
 def get_invite_state(employee):
     """Состояние входа записи: ("linked"|"pending"|"expired"|"none", срок или None)."""
     if employee.get("user_id") is not None:
