@@ -21,30 +21,40 @@ def calculate_work_time(shifts):
 
 
 def format_schedule_message():
-    """Форматирует график смен в читаемое сообщение."""
+    """Форматирует список смен новой структуры в читаемое сообщение."""
     schedule = get_schedule()
     if not schedule:
         return "График смен пока не составлен"
 
-    # Группируем смены по датам.
     schedule_by_date = {}
     for item in schedule:
-        date_label = item["date"]
-        if date_label not in schedule_by_date:
-            schedule_by_date[date_label] = []
-        schedule_by_date[date_label].append(
-            f"{item['employee_name']}: {item['shift_hours']}"
+        try:
+            date_value = datetime.strptime(item["date"], "%Y-%m-%d")
+            date_label = date_value.strftime("%d.%m.%Y")
+            shift_label = (
+                f"{item['employee_name']}: "
+                f"{item['start_time']}–{item['end_time']}"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        schedule_by_date.setdefault(date_label, []).append(
+            (item["start_time"], shift_label)
         )
 
-    # Форматируем сообщение.
-    message = "📅 График смен на неделю:\n\n"
-    for date_label in sorted(schedule_by_date.keys()):
+    if not schedule_by_date:
+        return "В расписании пока нет корректных смен."
+
+    message = "📅 График смен:\n\n"
+    for date_label in sorted(
+        schedule_by_date,
+        key=lambda value: datetime.strptime(value, "%d.%m.%Y")
+    ):
         message += f"📅 {date_label}:\n"
-        for shift in schedule_by_date[date_label]:
-            message += f"  • {shift}\n"
+        for _, shift_label in sorted(schedule_by_date[date_label]):
+            message += f"  • {shift_label}\n"
         message += "\n"
 
-    return message
+    return message.rstrip()
 
 
 def _closed_shifts_between(start_date, end_date):

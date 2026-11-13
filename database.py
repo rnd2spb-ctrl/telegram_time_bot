@@ -1,6 +1,8 @@
 # database.py
 import json
 import os
+import re
+import uuid
 from datetime import datetime
 
 DATA_DIR = "data"
@@ -107,6 +109,7 @@ def bind_employee_to_user(phone_number, user_id):
     target.setdefault("status", "active")
     target.setdefault("registered_at", datetime.now().isoformat(timespec="seconds"))
     save_json("employees.json", employees)
+    _sync_schedule_employee(normalized_phone, target)
     return True, "ok", target
 
 
@@ -155,6 +158,7 @@ def update_employee(phone_number, first_name=None, last_name=None, new_phone=Non
     )
     if target is None:
         return False, "not_found"
+    old_phone_key = normalize_phone(target.get("phone_number"))
     if new_phone is not None:
         import re
         if not isinstance(new_phone, str) or not re.fullmatch(r"\+?\d{7,15}", new_phone):
@@ -171,6 +175,7 @@ def update_employee(phone_number, first_name=None, last_name=None, new_phone=Non
     if last_name is not None:
         target["last_name"] = last_name.strip()
     save_json("employees.json", employees)
+    _sync_schedule_employee(old_phone_key, target)
     return True, "ok"
 
 
@@ -208,6 +213,12 @@ def delete_employee_without_history(phone_number, protected_user_id=None):
         shifts = load_json("shifts.json")
         if any(shift.get("user_id") == user_id for shift in shifts):
             return False, "has_history"
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "schedule_data_invalid"
+    employee_id = f"phone:{normalize_phone(target.get('phone_number'))}"
+    if any(item.get("employee_id") == employee_id for item in schedule):
+        return False, "has_schedule"
     employees.remove(target)
     save_json("employees.json", employees)
     return True, "ok"
@@ -338,18 +349,391 @@ def end_shift(user_id):
 
 
 # Функции для работы с графиком
+def _schedule_entry_is_valid(entry):
+    """Проверяет запись расписания только по новой строгой структуре."""
+    if not isinstance(entry, dict):
+        return False
+    required = {
+        "id", "date", "employee_id", "user_id", "employee_name",
+        "employee_phone", "start_time", "end_time",
+        "created_by_user_id", "created_by_role", "created_at"
+    }
+    if not required.issubset(entry):
+        return False
+    if not isinstance(entry.get("id"), str) or not entry["id"]:
+        return False
+    employee_id = entry.get("employee_id")
+    if not isinstance(employee_id, str) or not employee_id:
+        return False
+    if not isinstance(entry.get("employee_name"), str) or not entry["employee_name"].strip():
+        return False
+    if entry.get("user_id") is not None and not isinstance(entry["user_id"], int):
+        return False
+    phone = entry.get("employee_phone")
+    if employee_id.startswith("phone:"):
+        if not isinstance(phone, str) or not re.fullmatch(r"\+?\d{7,15}", phone):
+            return False
+        if employee_id != f"phone:{normalize_phone(phone)}":
+            return False
+    elif re.fullmatch(r"owner:\d+", employee_id):
+        if not isinstance(entry.get("user_id"), int):
+            return False
+        if employee_id != f"owner:{entry['user_id']}" or phone is not None:
+            return False
+    else:
+        return False
+    if not isinstance(entry.get("created_by_user_id"), int) or entry["created_by_user_id"] <= 0:
+        return False
+    if not isinstance(entry.get("created_at"), str) or not entry["created_at"]:
+        return False
+    if entry.get("created_by_role") not in {"owner", "admin"}:
+        return False
+    if not _valid_schedule_date(entry.get("date")):
+        return False
+    start_minutes = schedule_time_to_minutes(entry.get("start_time"), allow_24=False)
+    end_minutes = schedule_time_to_minutes(entry.get("end_time"), allow_24=True)
+    return start_minutes is not None and end_minutes is not None and start_minutes < end_minutes
+
+
+def _valid_schedule_date(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value
+    except ValueError:
+        return False
+
+
+def schedule_time_to_minutes(value, allow_24=False):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):00|24:00", value):
+        return None
+    if value == "24:00" and not allow_24:
+        return None
+    if value == "24:00":
+        return 24 * 60
+    hours, minutes = (int(part) for part in value.split(":"))
+    return hours * 60 + minutes
+
+
+def _read_schedule_records():
+    """Читает только записи новой структуры; старый формат не преобразуется."""
+    filepath = os.path.join(DATA_DIR, "schedule.json")
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            schedule = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(schedule, list):
+        return None
+    if any(not _schedule_entry_is_valid(item) for item in schedule):
+        return None
+    identifiers = [item["id"] for item in schedule]
+    if len(identifiers) != len(set(identifiers)):
+        return None
+    return schedule
+
+
+
+def get_invalid_schedule_records(actor_role="owner", owner_user_id=None):
+    """Возвращает ошибочные записи расписания с исходными индексами; файл не меняет."""
+    filepath = os.path.join(DATA_DIR, "schedule.json")
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            schedule = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(schedule, list):
+        return None
+
+    result = []
+    for index, item in enumerate(schedule):
+        if _schedule_entry_is_valid(item):
+            continue
+        if actor_role != "owner" and isinstance(item, dict):
+            is_owner_record = (
+                item.get("user_id") == owner_user_id
+                or item.get("employee_id") == f"owner:{owner_user_id}"
+            )
+            if is_owner_record:
+                continue
+        if isinstance(item, dict):
+            name = item.get("employee_name") or "Имя не указано"
+            date_value = item.get("date") or "дата не указана"
+            start = item.get("start_time") or "?"
+            end = item.get("end_time") or "?"
+        else:
+            name, date_value, start, end = "Некорректная запись", "—", "?", "?"
+        result.append({
+            "index": index,
+            "name": str(name),
+            "date": str(date_value),
+            "start_time": str(start),
+            "end_time": str(end)
+        })
+    return result
+
+
+def delete_invalid_schedule_records(indices, actor_user_id, actor_role, owner_user_id=None):
+    """Удаляет выбранные ошибочные записи; валидные и смены владельца защищены."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", []
+    if not isinstance(indices, (list, tuple)) or not indices:
+        return False, "invalid_selection", []
+
+    filepath = os.path.join(DATA_DIR, "schedule.json")
+    if not os.path.exists(filepath):
+        return False, "not_found", []
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            schedule = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return False, "invalid_schedule_file", []
+    if not isinstance(schedule, list):
+        return False, "invalid_schedule_file", []
+
+    if any(not isinstance(i, int) or isinstance(i, bool) for i in indices):
+        return False, "invalid_selection", []
+    selected = sorted(set(indices))
+    if any(not 0 <= i < len(schedule) for i in selected):
+        return False, "not_found", []
+
+    deleted = []
+    for index in selected:
+        item = schedule[index]
+        if _schedule_entry_is_valid(item):
+            return False, "not_invalid", []
+        if actor_role != "owner" and isinstance(item, dict):
+            if (
+                item.get("user_id") == owner_user_id
+                or item.get("employee_id") == f"owner:{owner_user_id}"
+            ):
+                return False, "owner_protected", []
+        deleted.append(item)
+
+    for index in reversed(selected):
+        schedule.pop(index)
+    save_json("schedule.json", schedule)
+    return True, "ok", deleted
+
+def _schedule_target_is_owner(employee, owner_user_id):
+    if owner_user_id is None or not isinstance(employee, dict):
+        return False
+    return (
+        employee.get("user_id") == owner_user_id
+        or employee.get("employee_id") == f"owner:{owner_user_id}"
+    )
+
+
+def _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+    if not isinstance(actor_user_id, int) or actor_user_id <= 0 or owner_user_id is None:
+        return False
+    if actor_role == "owner":
+        return actor_user_id == owner_user_id
+    if actor_role == "admin" and actor_user_id != owner_user_id:
+        actor = get_employee_by_user_id(actor_user_id)
+        return bool(
+            actor
+            and actor.get("status", "active") == "active"
+            and actor.get("role") == "admin"
+        )
+    return False
+
+
+def _schedule_employee_is_valid(employee, owner_user_id):
+    if not isinstance(employee, dict):
+        return False
+    employee_id = employee.get("employee_id")
+    employee_name = employee.get("employee_name")
+    user_id = employee.get("user_id")
+    phone = employee.get("employee_phone")
+
+    if not isinstance(employee_name, str) or not employee_name.strip():
+        return False
+    if employee_id == f"owner:{owner_user_id}" and owner_user_id is not None:
+        return user_id == owner_user_id and phone is None
+
+    if not isinstance(phone, str) or not re.fullmatch(r"\+?\d{7,15}", phone):
+        return False
+    normalized_phone = normalize_phone(phone)
+    if employee_id != f"phone:{normalized_phone}":
+        return False
+
+    target = next(
+        (item for item in get_all_employees()
+         if normalize_phone(item.get("phone_number")) == normalized_phone),
+        None
+    )
+    if target is None or target.get("status", "active") != "active":
+        return False
+    expected_name = " ".join(
+        part for part in (target.get("last_name"), target.get("first_name")) if part
+    ) or "Имя не указано"
+    return target.get("user_id") == user_id and employee_name == expected_name
+
+
+def _schedule_has_overlap(schedule, date_value, employee_id, start_time, end_time, exclude_id=None):
+    start_minutes = schedule_time_to_minutes(start_time, allow_24=False)
+    end_minutes = schedule_time_to_minutes(end_time, allow_24=True)
+    for item in schedule:
+        if item.get("id") == exclude_id:
+            continue
+        if item.get("date") != date_value or item.get("employee_id") != employee_id:
+            continue
+        other_start = schedule_time_to_minutes(item.get("start_time"), allow_24=False)
+        other_end = schedule_time_to_minutes(item.get("end_time"), allow_24=True)
+        if other_start is None or other_end is None:
+            continue
+        if start_minutes < other_end and other_start < end_minutes:
+            return True
+    return False
+
+
+def _sync_schedule_employee(old_phone_key, employee):
+    """Сохраняет связь расписания с сотрудником при изменении его номера/ФИО."""
+    schedule = _read_schedule_records()
+    if not schedule:
+        return
+    old_employee_id = f"phone:{old_phone_key}"
+    new_phone = employee.get("phone_number")
+    new_employee_id = f"phone:{normalize_phone(new_phone)}"
+    employee_name = " ".join(
+        part for part in (employee.get("last_name"), employee.get("first_name")) if part
+    ) or "Имя не указано"
+    changed = False
+    for item in schedule:
+        if item.get("employee_id") != old_employee_id:
+            continue
+        item["employee_id"] = new_employee_id
+        item["employee_phone"] = new_phone
+        item["user_id"] = employee.get("user_id")
+        item["employee_name"] = employee_name
+        item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        changed = True
+    if changed:
+        save_json("schedule.json", schedule)
+
+
 def get_schedule():
-    return load_json("schedule.json")
+    """Возвращает записи только нового формата; старые записи не интерпретируются."""
+    schedule = _read_schedule_records()
+    return schedule if schedule is not None else []
 
 
-def add_to_schedule(date, employee_name, shift_hours):
-    schedule = load_json("schedule.json")
-    schedule.append({
-        "date": date,
-        "employee_name": employee_name,
-        "shift_hours": shift_hours
+def get_schedule_entry(schedule_id):
+    return next(
+        (item for item in get_schedule() if item.get("id") == schedule_id),
+        None
+    )
+
+
+def add_to_schedule(date_value, employee, start_time, end_time,
+                    actor_user_id, actor_role, owner_user_id=None):
+    """Добавляет проверенную смену в расписание."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", None
+    if not _valid_schedule_date(date_value):
+        return False, "invalid_date", None
+    start_minutes = schedule_time_to_minutes(start_time, allow_24=False)
+    end_minutes = schedule_time_to_minutes(end_time, allow_24=True)
+    if start_minutes is None or end_minutes is None or start_minutes >= end_minutes:
+        return False, "invalid_time", None
+    if not _schedule_employee_is_valid(employee, owner_user_id):
+        return False, "employee_not_available", None
+    if actor_role != "owner" and _schedule_target_is_owner(employee, owner_user_id):
+        return False, "owner_protected", None
+
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "invalid_schedule_data", None
+    if _schedule_has_overlap(
+        schedule, date_value, employee["employee_id"], start_time, end_time
+    ):
+        return False, "overlap", None
+
+    now = datetime.now().isoformat(timespec="seconds")
+    entry = {
+        "id": uuid.uuid4().hex,
+        "date": date_value,
+        "employee_id": employee["employee_id"],
+        "user_id": employee.get("user_id"),
+        "employee_name": employee["employee_name"].strip(),
+        "employee_phone": employee.get("employee_phone"),
+        "start_time": start_time,
+        "end_time": end_time,
+        "created_by_user_id": actor_user_id,
+        "created_by_role": actor_role,
+        "created_at": now
+    }
+    schedule.append(entry)
+    save_json("schedule.json", schedule)
+    return True, "ok", entry
+
+
+def update_schedule_entry(schedule_id, date_value, employee, start_time, end_time,
+                          actor_user_id, actor_role, owner_user_id=None):
+    """Изменяет назначение/время записи с повторной проверкой прав и пересечений."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", None, None
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "invalid_schedule_data", None, None
+    current = next((item for item in schedule if item.get("id") == schedule_id), None)
+    if current is None:
+        return False, "not_found", None, None
+    if actor_role != "owner" and _schedule_target_is_owner(current, owner_user_id):
+        return False, "owner_protected", current, None
+    if actor_role != "owner" and _schedule_target_is_owner(employee, owner_user_id):
+        return False, "owner_protected", current, None
+    if not _valid_schedule_date(date_value):
+        return False, "invalid_date", current, None
+    start_minutes = schedule_time_to_minutes(start_time, allow_24=False)
+    end_minutes = schedule_time_to_minutes(end_time, allow_24=True)
+    if start_minutes is None or end_minutes is None or start_minutes >= end_minutes:
+        return False, "invalid_time", current, None
+    if not _schedule_employee_is_valid(employee, owner_user_id):
+        return False, "employee_not_available", current, None
+    if _schedule_has_overlap(
+        schedule, date_value, employee["employee_id"], start_time, end_time,
+        exclude_id=schedule_id
+    ):
+        return False, "overlap", current, None
+
+    old_entry = dict(current)
+    current.update({
+        "date": date_value,
+        "employee_id": employee["employee_id"],
+        "user_id": employee.get("user_id"),
+        "employee_name": employee["employee_name"].strip(),
+        "employee_phone": employee.get("employee_phone"),
+        "start_time": start_time,
+        "end_time": end_time,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_by_user_id": actor_user_id,
+        "updated_by_role": actor_role
     })
     save_json("schedule.json", schedule)
+    return True, "ok", old_entry, dict(current)
+
+
+def delete_schedule_entry(schedule_id, actor_user_id, actor_role, owner_user_id=None):
+    """Удаляет запись расписания; администратору запрещено менять смены владельца."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", None
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "invalid_schedule_data", None
+    current = next((item for item in schedule if item.get("id") == schedule_id), None)
+    if current is None:
+        return False, "not_found", None
+    if actor_role != "owner" and _schedule_target_is_owner(current, owner_user_id):
+        return False, "owner_protected", current
+    schedule.remove(current)
+    save_json("schedule.json", schedule)
+    return True, "ok", dict(current)
 
 
 # Функции для отчетов

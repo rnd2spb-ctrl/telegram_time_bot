@@ -55,3 +55,14 @@ def get_admin_keyboard():
         [KeyboardButton("На главную")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+
+
+def get_schedule_management_keyboard():
+    """Меню добавления, изменения и удаления запланированных смен."""
+    buttons = [
+        [KeyboardButton("Добавить смену")],
+        [KeyboardButton("Изменить смену"), KeyboardButton("Удалить смену")],
+        [KeyboardButton("Удалить ошибочные смены")],
+        [KeyboardButton(BACK_BUTTON)]
+    ]
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
