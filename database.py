@@ -449,6 +449,7 @@ def start_shift(user_id, employee_name=None):
     save_json("shifts.json", shifts)
 
 
+
 def end_shift(user_id):
     """Закрывает активную смену пользователя и сохраняет время окончания."""
     shifts = load_json("shifts.json")

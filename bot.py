@@ -310,6 +310,7 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner')
     )
 
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает основные кнопки: смены, время, расписание, сотрудников и отчеты."""
 
@@ -1259,7 +1260,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('new_employee_phone', None)
     clear_schedule_state(context)
     context.user_data.pop('editable_employee_phones', None)
+    context.user_data.pop('editable_employee_ids', None)
     context.user_data.pop('editing_employee_phone', None)
+    context.user_data.pop('editing_employee_id', None)
     clear_manage_employee_state(context)
     parent = context.user_data.get('menu_parent')
     if parent == 'employees' and is_admin_role(role):
@@ -1273,6 +1276,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = 'Главное меню:'
     await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
+
 
 def main():
     """Создает приложение Telegram, регистрирует обработчики и запускает polling."""

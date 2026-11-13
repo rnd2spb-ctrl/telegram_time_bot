@@ -7,13 +7,15 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton
 BACK_BUTTON = "⬅️ Назад в меню"
 
 
-def get_main_keyboard(has_admin_access=False, is_owner=False):
-    """Создает главное меню; административные кнопки добавляет только при наличии прав."""
+def get_main_keyboard(is_admin=False, is_owner=False, has_admin_access=None):
+    """Создает главное меню; сохраняет совместимость со старым именем параметра."""
+    if has_admin_access is not None:
+        is_admin = has_admin_access
     buttons = [
         [KeyboardButton("Начать смену"), KeyboardButton("Закончить смену")],
         [KeyboardButton("График смен"), KeyboardButton("Мое время")]
     ]
-    if has_admin_access:
+    if is_admin:
         buttons.append([KeyboardButton("Редактировать"), KeyboardButton("Управление графиком")])
         buttons.append([KeyboardButton("Отчет за неделю"), KeyboardButton("Отчет за месяц")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
