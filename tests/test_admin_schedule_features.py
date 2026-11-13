@@ -327,5 +327,77 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0435 \u0441\u043c\u0435\u043d\u044b", bot.MENU_BUTTONS)
 
 
+    def test_explicit_employee_role_overrides_legacy_is_admin_flag(self):
+        employee = {"last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "employee", "is_admin": True}
+        with patch.object(bot.config, "OWNER_ID", None):
+            self.assertEqual(bot.employee_prompt_label(employee), "\u0418\u0432\u0430\u043d\u043e\u0432 >")
+            unbound = {"last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "user_id": None, "role": "employee"}
+            self.assertEqual(bot.employee_prompt_label(unbound), "\u0418\u0432\u0430\u043d\u043e\u0432 >")
+
+    def test_schedule_date_handler_accepts_multiple_days_and_labels_admin(self):
+        from datetime import datetime
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 13, 12, 0)
+
+        admin_option = {
+            "employee_id": "phone:79990000003", "user_id": 201,
+            "employee_name": "\u041f\u0435\u0442\u0440\u043e\u0432 Petr", "employee_phone": "+79990000003",
+            "role": "admin"
+        }
+        employee_option = {
+            "employee_id": "phone:79990000004", "user_id": 202,
+            "employee_name": "\u0418\u0432\u0430\u043d\u043e\u0432 Ivan", "employee_phone": "+79990000004",
+            "role": "employee"
+        }
+        update = FakeUpdate("13,15-16", 200)
+        context = FakeContext({"schedule_action": "add"})
+        with patch.object(bot, "datetime", FixedDateTime), \
+             patch.object(bot, "require_admin", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "get_user_role", return_value="admin"), \
+             patch.object(bot, "_schedule_employee_options", return_value=[admin_option, employee_option]):
+            state = asyncio.run(bot.schedule_date(update, context))
+        self.assertEqual(state, bot.GET_SCHEDULE_EMPLOYEE)
+        self.assertEqual(context.user_data["schedule_dates"], [
+            "2026-11-13", "2026-11-15", "2026-11-16"
+        ])
+        prompt = update.message.replies[-1][0]
+        self.assertIn("\u041f\u0435\u0442\u0440\u043e\u0432 (\u0430\u0434\u043c\u0438\u043d) >", prompt)
+        self.assertIn("\u0418\u0432\u0430\u043d\u043e\u0432 >", prompt)
+
+    def test_admin_can_update_dismiss_and_delete_other_admin_in_real_database(self):
+        owner = {"user_id": 100, "phone_number": "+79990000001", "first_name": "Owner", "last_name": "Owner", "role": "owner", "status": "active"}
+        first_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petr", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
+        second_admin = {"user_id": 202, "phone_number": "+79990000004", "first_name": "Ivan", "last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "admin", "status": "active"}
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(database, "DATA_DIR", temp_dir):
+            database.save_json("employees.json", [owner, first_admin, second_admin])
+            changed, reason = database.update_employee(
+                first_admin["phone_number"], first_name="Petr Updated",
+                last_name="\u0421\u0438\u0434\u043e\u0440\u043e\u0432", new_phone="+79990000033"
+            )
+            self.assertTrue(changed)
+            self.assertEqual(reason, "ok")
+            updated = database.get_employee_by_user_id(201)
+            self.assertEqual(updated["role"], "admin")
+            self.assertEqual(updated["phone_number"], "+79990000033")
+            dismissed, reason = database.dismiss_employee("+79990000033", protected_user_id=100)
+            self.assertTrue(dismissed)
+            self.assertEqual(reason, "ok")
+            self.assertEqual(database.get_employee_by_user_id(201)["role"], "admin")
+            self.assertEqual(database.get_employee_by_user_id(201)["status"], "dismissed")
+            deleted, reason = database.delete_employee_without_history(
+                second_admin["phone_number"], protected_user_id=100
+            )
+            self.assertTrue(deleted)
+            self.assertEqual(reason, "ok")
+            self.assertIsNone(database.get_employee_by_user_id(202))
+            protected, reason = database.dismiss_employee(owner["phone_number"], protected_user_id=100)
+            self.assertFalse(protected)
+            self.assertEqual(reason, "protected")
+            self.assertIsNotNone(database.get_employee_by_user_id(100))
+
+
 if __name__ == "__main__":
     unittest.main()

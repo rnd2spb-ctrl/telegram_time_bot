@@ -23,17 +23,20 @@ MENU_BUTTON_PATTERN = '^(?:' + '|'.join((re.escape(label) for label in MENU_BUTT
 
 
 def employee_prompt_label(employee):
-    """Short surname + role marker for employee pickers."""
+    """Return surname, optional admin marker, and the prompt arrow."""
     if not isinstance(employee, dict):
         return '\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a >'
+    if (config.OWNER_ID is not None and employee.get('user_id') == config.OWNER_ID) or employee.get('role') == 'owner':
+        return '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446 >'
     surname = str(employee.get('last_name') or '').strip()
     if not surname:
         full_name = ' '.join(str(employee.get(key) or '').strip() for key in ('first_name', 'name')).strip()
         surname = full_name.split()[0] if full_name else '\u0411\u0435\u0437 \u0444\u0430\u043c\u0438\u043b\u0438\u0438'
-    role = employee.get('role', 'admin' if employee.get('is_admin') is True else 'employee')
-    suffix = ' (\u0430\u0434\u043c\u0438\u043d)' if role == 'admin' or employee.get('is_admin') is True else ''
+    role = employee.get('role')
+    if role is None:
+        role = 'admin' if employee.get('is_admin') is True else 'employee'
+    suffix = ' (\u0430\u0434\u043c\u0438\u043d)' if role == 'admin' else ''
     return f'{surname}{suffix} >'
-
 
 def schedule_entry_prompt_label(entry):
     """Return the surname and role for a schedule row."""
@@ -290,11 +293,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 full_name = ' '.join((part for part in (item.get('last_name'), item.get('first_name')) if part)) or 'Имя не указано'
                 phone = item.get('phone_number') or 'телефон не указан'
                 status = item.get('status', 'не указан')
-                role_name = item.get('role', 'employee')
                 if not (isinstance(phone, str) and re.fullmatch('\\+?\\d{7,15}', phone)):
                     lines.append(f'⚠️ Некорректная запись: {full_name} — {phone}')
                     continue
-                lines.append(f'• {full_name} — {phone} — {status} — {role_name}')
+                lines.append(f'\u2022 {employee_prompt_label(item)} \u2014 {phone} \u2014 {status}')
             message = '\n'.join(lines)
         await update.message.reply_text(message, reply_markup=get_main_keyboard(True, role == 'owner'))
         return
@@ -330,11 +332,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not (isinstance(phone, str) and re.fullmatch('\\+?\\d{7,15}', phone)):
                 lines.append(f'⚠️ Некорректная запись: {name} — {phone}')
                 continue
-            if item.get('status') == 'dismissed':
-                name = '☠️ ' + name
             status_marker = '☠️ ' if item.get('status') == 'dismissed' else ''
-            lines.append(f'{status_marker}{employee_prompt_label(item)} — {phone} — {item.get('status', '?? ??????')}')
-            continue
+            lines.append(f'{status_marker}{employee_prompt_label(item)} — {phone} — {item.get('status', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')}')
         await update.message.reply_text('\n'.join(lines), reply_markup=get_employee_management_keyboard(role == 'owner'))
         return
     if text in {'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи'}:
@@ -643,7 +642,7 @@ def _schedule_entry_label(entry):
     try:
         date_label = datetime.strptime(entry['date'], '%Y-%m-%d').strftime('%d.%m.%Y')
     except (KeyError, TypeError, ValueError):
-        date_label = entry.get('date', '???? ?? ???????')
+        date_label = entry.get('date', '\u0434\u0430\u0442\u0430 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430')
     return f'{date_label} {chr(0x2014)} {schedule_entry_prompt_label(entry)} {chr(0x2014)} {entry.get("start_time", "?")}{chr(0x2013)}{entry.get("end_time", "?")}'
 
 def _manageable_schedule_entries(role):
