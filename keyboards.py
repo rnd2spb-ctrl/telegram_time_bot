@@ -20,7 +20,7 @@ def get_main_keyboard(is_admin=False, is_owner=False):
 def get_employee_management_keyboard(is_owner=False):
     """Меню управления сотрудниками."""
     buttons = [
-        [KeyboardButton("Добавить сотрудника")],
+        [KeyboardButton("Добавить сотрудника"), KeyboardButton("Новая ссылка")],
         [KeyboardButton("Изменить данные"), KeyboardButton("Уволить сотрудника")],
         [KeyboardButton("Удалить сотрудника"), KeyboardButton("Удалить ошибочные записи")]
     ]
@@ -35,15 +35,6 @@ def get_dialog_keyboard():
     return ReplyKeyboardMarkup(
         [[KeyboardButton(BACK_BUTTON)]],
         resize_keyboard=True
-    )
-
-
-def get_phone_keyboard():
-    """Клавиатура для запроса номера телефона."""
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("Поделиться контактом", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
     )
 
 
