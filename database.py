@@ -1,3 +1,5 @@
+"""Работа с JSON-хранилищем: сотрудники, учет смен, расписание и журнал аудита."""
+
 # database.py
 import hashlib
 import hmac
@@ -15,14 +17,15 @@ INVITE_TTL_HOURS = 72
 _INVITE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 
+# --- Общие функции JSON-хранилища ---
 def ensure_data_dir():
-    """Создает папку для данных если её нет"""
+    """Создает каталог data, если он еще не существует."""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
 
 def load_json(filename):
-    """Загружает данные из JSON файла"""
+    """Загружает JSON-файл из data; при отсутствии или ошибке возвращает пустой список."""
     ensure_data_dir()
     filepath = os.path.join(DATA_DIR, filename)
     if not os.path.exists(filepath):
@@ -35,7 +38,7 @@ def load_json(filename):
 
 
 def save_json(filename, data):
-    """Сохраняет данные в JSON файл"""
+    """Сохраняет данные в JSON с UTF-8 и читаемым форматированием."""
     ensure_data_dir()
     filepath = os.path.join(DATA_DIR, filename)
     with open(filepath, "w", encoding="utf-8") as f:
@@ -43,12 +46,14 @@ def save_json(filename, data):
 
 
 # Функции для работы с сотрудниками
+# --- Сотрудники и привязка Telegram ---
 def normalize_phone(phone_number):
-    """Оставляет в номере только цифры для сравнения разных форматов записи."""
+    """Оставляет в номере только цифры для сравнения разных форматов."""
     return "".join(char for char in str(phone_number or "") if char.isdigit())
 
 
 def get_employee_by_phone(phone_number):
+    """Находит сотрудника по нормализованному номеру телефона."""
     employees = load_json("employees.json")
     normalized_phone = normalize_phone(phone_number)
     for employee in employees:
@@ -58,6 +63,7 @@ def get_employee_by_phone(phone_number):
 
 
 def get_employee_by_user_id(user_id):
+    """Находит сотрудника по привязанному Telegram ID."""
     employees = load_json("employees.json")
     for employee in employees:
         if employee.get("user_id") == user_id:
@@ -70,21 +76,31 @@ def get_all_employees():
     return load_json("employees.json")
 
 
-def set_employee_role(user_id, role):
-    """Меняет роль привязанного активного сотрудника без изменения остальных данных."""
+def set_employee_role_by_phone(phone_number, role, protected_user_id=None):
+    """Назначает или снимает роль администратора у активной записи по телефону."""
     if role not in {"employee", "admin"}:
         return False, "invalid_role"
+    normalized_phone = normalize_phone(phone_number)
+    if not normalized_phone:
+        return False, "invalid_phone"
 
     employees = load_json("employees.json")
     employee = next(
-        (item for item in employees if item.get("user_id") == user_id),
+        (item for item in employees
+         if normalize_phone(item.get("phone_number")) == normalized_phone),
         None
     )
     if employee is None:
         return False, "not_found"
+    if employee.get("user_id") == protected_user_id and protected_user_id is not None:
+        return False, "protected"
+    if employee.get("role") == "owner":
+        return False, "protected"
     if employee.get("status", "active") != "active":
         return False, "inactive"
-    if employee.get("role", "employee") == role:
+
+    current_role = employee.get("role") or "employee"
+    if current_role == role:
         return False, "unchanged"
 
     employee["role"] = role
@@ -204,7 +220,7 @@ def get_unlinked_employees():
 
 
 def add_employee(user_id, phone_number, first_name, last_name):
-    """Add an employee only with a valid phone number and non-empty name."""
+    """Создает новую запись сотрудника с постоянным employee_id и статусом."""
     normalized_phone = normalize_phone(phone_number)
     if not normalized_phone.isdigit() or not 7 <= len(normalized_phone) <= 15:
         return False
@@ -239,7 +255,7 @@ def add_employee(user_id, phone_number, first_name, last_name):
 
 
 def update_employee(phone_number, first_name=None, last_name=None, new_phone=None):
-    """Обновляет ФИО сотрудника, не меняя роль, статус и историю смен."""
+    """Изменяет ФИО и/или телефон сотрудника, синхронизируя связанные записи расписания."""
     employees = load_json("employees.json")
     target = next(
         (item for item in employees
@@ -270,7 +286,7 @@ def update_employee(phone_number, first_name=None, last_name=None, new_phone=Non
 
 
 def dismiss_employee(phone_number, protected_user_id=None):
-    """Увольняет сотрудника, сохраняя запись и историю смен."""
+    """Переводит сотрудника в статус dismissed без удаления истории."""
     employees = load_json("employees.json")
     target = next(
         (item for item in employees
@@ -287,7 +303,7 @@ def dismiss_employee(phone_number, protected_user_id=None):
 
 
 def delete_employee_without_history(phone_number, protected_user_id=None):
-    """Удаляет запись только при отсутствии смен; историю никогда не удаляет."""
+    """Удаляет сотрудника только при отсутствии связанной истории смен."""
     employees = load_json("employees.json")
     target = next(
         (item for item in employees
@@ -315,13 +331,13 @@ def delete_employee_without_history(phone_number, protected_user_id=None):
 
 
 def get_invalid_employee_records():
-    """Возвращает только ошибочные непривязанные записи."""
+    """Находит ошибочные записи сотрудников и возвращает их исходные индексы."""
     import re
     result = []
     for index, employee in enumerate(get_all_employees()):
         phone = employee.get("phone_number")
         valid = isinstance(phone, str) and re.fullmatch(r"\+?\d{7,15}", phone)
-        if not valid and employee.get("user_id") is None and employee.get("is_admin") is not True:
+        if not valid and employee.get("user_id") is None:
             name = " ".join(
                 part for part in (employee.get("last_name"), employee.get("first_name")) if part
             ) or "Имя не указано"
@@ -330,7 +346,7 @@ def get_invalid_employee_records():
 
 
 def delete_invalid_employee_record(index):
-    """Удаляет только ошибочную непривязанную запись; реальные записи защищены."""
+    """Удаляет одну выбранную некорректную запись по исходному индексу."""
     import re
     employees = load_json("employees.json")
     if not isinstance(index, int) or not 0 <= index < len(employees):
@@ -338,7 +354,7 @@ def delete_invalid_employee_record(index):
     target = employees[index]
     phone = target.get("phone_number")
     valid = isinstance(phone, str) and re.fullmatch(r"\+?\d{7,15}", phone)
-    if valid or target.get("user_id") is not None or target.get("is_admin") is True:
+    if valid or target.get("user_id") is not None:
         return False, "not_invalid"
     employees.pop(index)
     save_json("employees.json", employees)
@@ -346,8 +362,9 @@ def delete_invalid_employee_record(index):
 
 
 
+# --- Журнал аудита ---
 def log_action(actor_user_id, actor_role, action, target_user_id=None, details=None):
-    """Safely append one successful operation to data/audit_log.json."""
+    """Добавляет запись о действии пользователя в data/audit_log.json."""
     import logging
 
     if not isinstance(action, str) or not action.strip():
@@ -395,7 +412,7 @@ def log_action(actor_user_id, actor_role, action, target_user_id=None, details=N
 
 
 def get_audit_log():
-    """Return audit entries without modifying the file."""
+    """Возвращает журнал аудита без изменения файла."""
     filepath = os.path.join(DATA_DIR, "audit_log.json")
     if not os.path.exists(filepath):
         return []
@@ -407,7 +424,9 @@ def get_audit_log():
         return []
 
 
+# --- Фактические рабочие смены ---
 def get_active_shift(user_id):
+    """Находит открытую смену пользователя."""
     shifts = load_json("shifts.json")
     for shift in shifts:
         if shift.get("user_id") == user_id and shift.get("status") == "active":
@@ -415,7 +434,8 @@ def get_active_shift(user_id):
     return None
 
 
-def start_shift(user_id):
+def start_shift(user_id, employee_name=None):
+    """Создает новую активную смену с текущим временем начала."""
     shifts = load_json("shifts.json")
     shift = {
         "user_id": user_id,
@@ -423,11 +443,14 @@ def start_shift(user_id):
         "shift_end": None,
         "status": "active"
     }
+    if employee_name:
+        shift["employee_name"] = str(employee_name).strip()
     shifts.append(shift)
     save_json("shifts.json", shifts)
 
 
 def end_shift(user_id):
+    """Закрывает активную смену пользователя и сохраняет время окончания."""
     shifts = load_json("shifts.json")
     for shift in shifts:
         if shift.get("user_id") == user_id and shift.get("status") == "active":
@@ -439,8 +462,9 @@ def end_shift(user_id):
 
 
 # Функции для работы с графиком
+# --- Проверка и обслуживание расписания ---
 def _schedule_entry_is_valid(entry):
-    """Проверяет запись расписания только по новой строгой структуре."""
+    """Проверяет обязательные поля и типы записи расписания новой структуры."""
     if not isinstance(entry, dict):
         return False
     required = {
@@ -486,6 +510,7 @@ def _schedule_entry_is_valid(entry):
 
 
 def _valid_schedule_date(value):
+    """Проверяет строгий формат даты YYYY-MM-DD и существование даты."""
     if not isinstance(value, str):
         return False
     try:
@@ -495,18 +520,19 @@ def _valid_schedule_date(value):
 
 
 def schedule_time_to_minutes(value, allow_24=False):
-    if not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):00|24:00", value):
-        return None
-    if value == "24:00" and not allow_24:
+    """Проверяет время HH:MM и переводит его в минуты от начала суток."""
+    if not isinstance(value, str):
         return None
     if value == "24:00":
-        return 24 * 60
+        return 24 * 60 if allow_24 else None
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+        return None
     hours, minutes = (int(part) for part in value.split(":"))
     return hours * 60 + minutes
 
 
 def _read_schedule_records():
-    """Читает только записи новой структуры; старый формат не преобразуется."""
+    """Читает расписание и отклоняет файл, если записи не соответствуют новой структуре."""
     filepath = os.path.join(DATA_DIR, "schedule.json")
     if not os.path.exists(filepath):
         return []
@@ -527,7 +553,7 @@ def _read_schedule_records():
 
 
 def get_invalid_schedule_records(actor_role="owner", owner_user_id=None):
-    """Возвращает ошибочные записи расписания с исходными индексами; файл не меняет."""
+    """Возвращает некорректные записи расписания с исходными индексами."""
     filepath = os.path.join(DATA_DIR, "schedule.json")
     if not os.path.exists(filepath):
         return []
@@ -568,7 +594,7 @@ def get_invalid_schedule_records(actor_role="owner", owner_user_id=None):
 
 
 def delete_invalid_schedule_records(indices, actor_user_id, actor_role, owner_user_id=None):
-    """Удаляет выбранные ошибочные записи; валидные и смены владельца защищены."""
+    """Удаляет только выбранные ошибочные записи; корректные записи и смены владельца защищены."""
     if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
         return False, "forbidden", []
     if not isinstance(indices, (list, tuple)) or not indices:
@@ -610,6 +636,7 @@ def delete_invalid_schedule_records(indices, actor_user_id, actor_role, owner_us
     return True, "ok", deleted
 
 def _schedule_target_is_owner(employee, owner_user_id):
+    """Определяет, принадлежит ли запись расписания владельцу."""
     if owner_user_id is None or not isinstance(employee, dict):
         return False
     return (
@@ -619,6 +646,7 @@ def _schedule_target_is_owner(employee, owner_user_id):
 
 
 def _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+    """Проверяет полномочия инициатора операции с расписанием."""
     if not isinstance(actor_user_id, int) or actor_user_id <= 0 or owner_user_id is None:
         return False
     if actor_role == "owner":
@@ -634,6 +662,7 @@ def _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
 
 
 def _schedule_employee_is_valid(employee, owner_user_id):
+    """Проверяет идентификатор, имя, телефон и статус назначаемого сотрудника."""
     if not isinstance(employee, dict):
         return False
     employee_id = employee.get("employee_id")
@@ -666,6 +695,7 @@ def _schedule_employee_is_valid(employee, owner_user_id):
 
 
 def _schedule_has_overlap(schedule, date_value, employee_id, start_time, end_time, exclude_id=None):
+    """Проверяет пересечение времени новой смены с другими сменами сотрудника в этот день."""
     start_minutes = schedule_time_to_minutes(start_time, allow_24=False)
     end_minutes = schedule_time_to_minutes(end_time, allow_24=True)
     for item in schedule:
@@ -682,8 +712,9 @@ def _schedule_has_overlap(schedule, date_value, employee_id, start_time, end_tim
     return False
 
 
+# --- Чтение и изменение расписания ---
 def _sync_schedule_employee(old_phone_key, employee):
-    """Сохраняет связь расписания с сотрудником при изменении его номера/ФИО."""
+    """Обновляет данные сотрудника в расписании после изменения его ФИО или телефона."""
     schedule = _read_schedule_records()
     if not schedule:
         return
@@ -708,12 +739,13 @@ def _sync_schedule_employee(old_phone_key, employee):
 
 
 def get_schedule():
-    """Возвращает записи только нового формата; старые записи не интерпретируются."""
+    """Возвращает проверенные записи расписания новой структуры."""
     schedule = _read_schedule_records()
     return schedule if schedule is not None else []
 
 
 def get_schedule_entry(schedule_id):
+    """Находит запись расписания по уникальному ID."""
     return next(
         (item for item in get_schedule() if item.get("id") == schedule_id),
         None
@@ -722,7 +754,7 @@ def get_schedule_entry(schedule_id):
 
 def add_to_schedule(date_value, employee, start_time, end_time,
                     actor_user_id, actor_role, owner_user_id=None):
-    """Добавляет проверенную смену в расписание."""
+    """Проверяет права, сотрудника, дату и время, затем добавляет смену."""
     if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
         return False, "forbidden", None
     if not _valid_schedule_date(date_value):
@@ -765,7 +797,7 @@ def add_to_schedule(date_value, employee, start_time, end_time,
 
 def update_schedule_entry(schedule_id, date_value, employee, start_time, end_time,
                           actor_user_id, actor_role, owner_user_id=None):
-    """Изменяет назначение/время записи с повторной проверкой прав и пересечений."""
+    """Проверяет права и ограничения, затем изменяет выбранную смену."""
     if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
         return False, "forbidden", None, None
     schedule = _read_schedule_records()
@@ -810,7 +842,7 @@ def update_schedule_entry(schedule_id, date_value, employee, start_time, end_tim
 
 
 def delete_schedule_entry(schedule_id, actor_user_id, actor_role, owner_user_id=None):
-    """Удаляет запись расписания; администратору запрещено менять смены владельца."""
+    """Удаляет одну смену после проверки прав и защиты смен владельца."""
     if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
         return False, "forbidden", None
     schedule = _read_schedule_records()
@@ -826,17 +858,54 @@ def delete_schedule_entry(schedule_id, actor_user_id, actor_role, owner_user_id=
     return True, "ok", dict(current)
 
 
+def delete_schedule_entries(schedule_ids, actor_user_id, actor_role, owner_user_id=None):
+    """Атомарно удаляет выбранные смены после проверки всех ID и прав."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", []
+    if not isinstance(schedule_ids, (list, tuple)) or not schedule_ids:
+        return False, "invalid_selection", []
+    if len(set(schedule_ids)) != len(schedule_ids):
+        return False, "invalid_selection", []
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "invalid_schedule_data", []
+    by_id = {item.get("id"): item for item in schedule}
+    if any(schedule_id not in by_id for schedule_id in schedule_ids):
+        return False, "not_found", []
+    selected = [by_id[schedule_id] for schedule_id in schedule_ids]
+    if actor_role != "owner" and any(_schedule_target_is_owner(item, owner_user_id) for item in selected):
+        return False, "owner_protected", []
+    selected_ids = set(schedule_ids)
+    remaining = [item for item in schedule if item.get("id") not in selected_ids]
+    save_json("schedule.json", remaining)
+    return True, "ok", [dict(item) for item in selected]
+
+
+
 # Функции для отчетов
+# --- Выборка смен для расчетов ---
 def get_user_shifts(user_id, days=30):
+    """Возвращает недавние закрытые смены пользователя и его текущую активную смену."""
     shifts = load_json("shifts.json")
+    now = datetime.now()
+    cutoff = now - timedelta(days=max(0, int(days)))
     user_shifts = []
     for shift in shifts:
-        if shift.get("user_id") == user_id and shift.get("status") == "closed":
+        if shift.get("user_id") != user_id:
+            continue
+        if shift.get("status") not in ("closed", "active"):
+            continue
+        try:
+            started_at = datetime.strptime(shift["shift_start"], "%Y-%m-%d %H:%M:%S")
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cutoff <= started_at <= now:
             user_shifts.append(shift)
-    return user_shifts[-days:]
+    return user_shifts
 
 
 def get_all_shifts(days=30):
+    """Возвращает последние закрытые смены всех пользователей."""
     shifts = load_json("shifts.json")
     recent_shifts = []
     for shift in shifts:

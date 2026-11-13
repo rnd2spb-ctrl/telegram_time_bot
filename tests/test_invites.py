@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 os.environ.setdefault("OWNER_ID", "1")
 os.environ.setdefault("BOT_TOKEN", "test-token")
+os.environ.setdefault("HOURLY_RATE", "167")
 
 try:
     import telegram  # noqa: F401
@@ -336,6 +337,43 @@ class BotInviteTests(TempDataCase):
         self.assertIn("истекла", bot.describe_link_state(waiting))
         waiting["status"] = "dismissed"
         self.assertEqual(bot.describe_link_state(waiting), "")
+
+    def add_unlinked_admin(self):
+        phone = "+70000000005"
+        self.save(self.records() + [employee(None, phone, "Новый", "Админов", role="admin")])
+        return phone
+
+    def select_invite(self, user_id, phone):
+        update = make_update(user_id, text="1")
+        context = make_context(user_data={"manage_employee_action": "invite", "manage_employee_phones": [phone]})
+        run(bot.manage_employee_select(update, context))
+        return update.message.replies[-1]
+
+    def test_admin_cannot_issue_link_to_admin_record(self):
+        phone = self.add_unlinked_admin()
+        reply = self.select_invite(ADMIN_ID, phone)
+        self.assertIn("Только владелец", reply)
+        self.assertNotIn("invite_hash", database.get_employee_by_phone(phone))
+
+    def test_owner_can_issue_link_to_admin_record(self):
+        phone = self.add_unlinked_admin()
+        reply = self.select_invite(OWNER_ID, phone)
+        self.assertTrue(TOKEN_RE.search(reply))
+
+    def test_new_link_list_hides_admin_records_from_admin_but_not_owner(self):
+        phone = self.add_unlinked_admin()
+        for user_id, expected in ((ADMIN_ID, False), (OWNER_ID, True)):
+            context = make_context()
+            run(bot.button_handler(make_update(user_id, text="Новая ссылка"), context))
+            self.assertEqual(phone in context.user_data.get("manage_employee_phones", []), expected)
+
+    def test_contact_gets_an_answer_not_silence(self):
+        stranger = make_update(NEWCOMER_ID)
+        run(bot.contact_not_supported(stranger, make_context()))
+        self.assertIn("ссылка-приглашение", stranger.message.replies[-1])
+        member = make_update(STAFF_ID)
+        run(bot.contact_not_supported(member, make_context()))
+        self.assertIn("только по ссылке", member.message.replies[-1])
 
 
 if __name__ == "__main__":

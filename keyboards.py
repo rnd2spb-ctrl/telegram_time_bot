@@ -1,3 +1,5 @@
+"""Функции построения клавиатур Telegram для меню и пошаговых диалогов."""
+
 # keyboards.py
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 
@@ -5,20 +7,20 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton
 BACK_BUTTON = "⬅️ Назад в меню"
 
 
-def get_main_keyboard(is_admin=False, is_owner=False):
-    """Главное меню."""
+def get_main_keyboard(has_admin_access=False, is_owner=False):
+    """Создает главное меню; административные кнопки добавляет только при наличии прав."""
     buttons = [
         [KeyboardButton("Начать смену"), KeyboardButton("Закончить смену")],
         [KeyboardButton("График смен"), KeyboardButton("Мое время")]
     ]
-    if is_admin:
+    if has_admin_access:
         buttons.append([KeyboardButton("Редактировать"), KeyboardButton("Управление графиком")])
         buttons.append([KeyboardButton("Отчет за неделю"), KeyboardButton("Отчет за месяц")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
 def get_employee_management_keyboard(is_owner=False):
-    """Меню управления сотрудниками."""
+    """Создает меню управления сотрудниками с учетом роли владельца."""
     buttons = [
         [KeyboardButton("Добавить сотрудника"), KeyboardButton("Новая ссылка")],
         [KeyboardButton("Изменить данные"), KeyboardButton("Уволить сотрудника")],
@@ -31,7 +33,7 @@ def get_employee_management_keyboard(is_owner=False):
 
 
 def get_dialog_keyboard():
-    """Клавиатура административного диалога с возможностью возврата."""
+    """Создает клавиатуру диалога с кнопкой возврата."""
     return ReplyKeyboardMarkup(
         [[KeyboardButton(BACK_BUTTON)]],
         resize_keyboard=True
@@ -39,7 +41,7 @@ def get_dialog_keyboard():
 
 
 def get_admin_keyboard():
-    """Админская клавиатура."""
+    """Создает клавиатуру административного раздела."""
     buttons = [
         [KeyboardButton("Редактировать"), KeyboardButton("Управление графиком")],
         [KeyboardButton("Отчет за неделю"), KeyboardButton("Отчет за месяц")],
@@ -49,7 +51,7 @@ def get_admin_keyboard():
 
 
 def get_schedule_management_keyboard():
-    """Меню добавления, изменения и удаления запланированных смен."""
+    """Создает меню добавления, изменения и удаления смен."""
     buttons = [
         [KeyboardButton("Добавить смену")],
         [KeyboardButton("Изменить смену"), KeyboardButton("Удалить смену")],
