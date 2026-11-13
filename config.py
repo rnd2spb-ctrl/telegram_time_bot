@@ -1,10 +1,13 @@
+"""Загрузка и проверка настроек бота из переменных окружения и файла .env."""
+
 # config.py
 import os
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
 def _load_env_file():
-    """Минимальная загрузка KEY=VALUE из .env без внешних зависимостей."""
+    """Загружает переменные из .env, не перезаписывая уже заданные переменные окружения."""
     env_path = Path(__file__).resolve().with_name(".env")
     if not env_path.is_file():
         return
@@ -26,6 +29,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 
 def _parse_telegram_id(value, variable_name):
+    """Проверяет Telegram ID из настроек и преобразует его в положительное целое число."""
     value = (value or "").strip()
     if not value:
         return None
@@ -40,3 +44,20 @@ def _parse_telegram_id(value, variable_name):
 
 # The owner is assigned explicitly; the first person to message the bot is not made owner.
 OWNER_ID = _parse_telegram_id(os.getenv("OWNER_ID"), "OWNER_ID")
+
+
+def _parse_hourly_rate(value):
+    """Проверяет почасовую ставку и преобразует ее в Decimal."""
+    if value is None or not str(value).strip():
+        raise ValueError("Укажите HOURLY_RATE в файле .env — почасовую ставку в рублях.")
+    try:
+        rate = Decimal(str(value).strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        raise ValueError("HOURLY_RATE должен быть числом в рублях за час.")
+    if not rate.is_finite() or rate < 0:
+        raise ValueError("HOURLY_RATE должен быть конечным неотрицательным числом.")
+    return rate
+
+
+# Значение ставки обязательно задаётся в .env.
+HOURLY_RATE = _parse_hourly_rate(os.getenv("HOURLY_RATE"))

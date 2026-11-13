@@ -1,27 +1,50 @@
+"""Расчеты рабочего времени и зарплаты, форматирование расписания и отчетов."""
+
 # utils.py
 from datetime import date, datetime, timedelta
 
 from database import get_schedule, get_all_shifts
 
 
-def calculate_work_time(shifts):
-    """Рассчитывает общее время работы из списка закрытых смен."""
+def work_time_seconds(shifts):
+    """Суммирует длительность закрытых смен и время текущей открытой смены."""
     total_seconds = 0
+    now = datetime.now()
     for shift in shifts:
         try:
             start = datetime.strptime(shift["shift_start"], "%Y-%m-%d %H:%M:%S")
-            end = datetime.strptime(shift["shift_end"], "%Y-%m-%d %H:%M:%S")
+            if shift.get("status") == "active" and not shift.get("shift_end"):
+                end = now
+            else:
+                end = datetime.strptime(shift["shift_end"], "%Y-%m-%d %H:%M:%S")
         except (KeyError, TypeError, ValueError):
             continue
         total_seconds += max(0, (end - start).total_seconds())
+    return int(total_seconds)
 
-    hours = int(total_seconds // 3600)
-    minutes = int((total_seconds % 3600) // 60)
-    return f"{hours}ч {minutes}м"
+
+def calculate_work_time(shifts):
+    """Преобразует общее время работы в часы и минуты."""
+    total_seconds = work_time_seconds(shifts)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    return f"{hours}\u0447 {minutes}\u043c"
+
+
+def calculate_salary(shifts):
+    """Рассчитывает оплату по фактическим секундам и ставке из конфигурации."""
+    from decimal import Decimal, ROUND_HALF_UP
+    import config
+
+    rate = Decimal(str(config.HOURLY_RATE))
+    amount = (Decimal(work_time_seconds(shifts)) * rate / Decimal(3600)).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+    return int(amount)
 
 
 def format_schedule_message():
-    """Форматирует список смен новой структуры в читаемое сообщение."""
+    """Группирует и форматирует корректные смены по датам для показа в Telegram."""
     schedule = get_schedule()
     if not schedule:
         return "График смен пока не составлен"
@@ -58,7 +81,7 @@ def format_schedule_message():
 
 
 def _closed_shifts_between(start_date, end_date):
-    """Возвращает закрытые смены за период [start_date, end_date)."""
+    """Выбирает закрытые смены за период от start_date включительно до end_date не включительно."""
     shifts = get_all_shifts(days=10**9)
     result = []
     for shift in shifts:
@@ -76,7 +99,7 @@ def _closed_shifts_between(start_date, end_date):
 
 
 def generate_weekly_report(today=None):
-    """Генерирует отчет за текущую календарную неделю (с понедельника)."""
+    """Формирует отчет по закрытым сменам за календарную неделю с понедельника."""
     today = today or date.today()
     start_date = today - timedelta(days=today.weekday())
     end_date = start_date + timedelta(days=7)
@@ -89,7 +112,7 @@ def generate_weekly_report(today=None):
 
 
 def generate_monthly_report(today=None):
-    """Генерирует отчет за текущий календарный месяц."""
+    """Формирует отчет по закрытым сменам за текущий календарный месяц."""
     today = today or date.today()
     start_date = today.replace(day=1)
     if start_date.month == 12:
@@ -102,27 +125,34 @@ def generate_monthly_report(today=None):
 
 
 def format_report(shifts, period):
-    """Группирует закрытые смены и считает время сотрудников."""
-    if not shifts:
-        return f"📊 Отчет за {period}:\n\nЗа выбранный период закрытых смен нет."
-
+    """Группирует смены по сотрудникам и рассчитывает личные и общие суммы."""
+    from collections import defaultdict
     from database import get_employee_by_user_id
 
-    user_shifts = {}
+    user_shifts = defaultdict(list)
     for shift in shifts:
-        user_id = shift.get("user_id")
-        user_shifts.setdefault(user_id, []).append(shift)
+        user_shifts[shift.get("user_id")].append(shift)
 
-    report = f"📊 Отчет за {period}:\n\n"
-    for user_id, employee_shifts in user_shifts.items():
+    report = f"\U0001F4CA Отчет за {period}:\n\n"
+    total_salary = 0
+    for user_id, employee_shifts in sorted(
+        user_shifts.items(), key=lambda item: str(item[0])
+    ):
         employee = get_employee_by_user_id(user_id) if user_id is not None else None
         if employee:
             name = " ".join(
-                part for part in (
-                    employee.get("first_name"), employee.get("last_name")
-                ) if part
+                part for part in (employee.get("first_name"), employee.get("last_name"))
+                if part
             ) or f"ID {user_id}"
+        elif employee_shifts[0].get("employee_name"):
+            name = employee_shifts[0]["employee_name"]
         else:
             name = f"Неизвестный сотрудник (ID {user_id})"
-        report += f"👤 {name}: {calculate_work_time(employee_shifts)}\n"
+        salary = calculate_salary(employee_shifts)
+        total_salary += salary
+        report += f"\U0001F464 {name}: {calculate_work_time(employee_shifts)} Сумма: {salary} руб.\n\n"
+
+    if not user_shifts:
+        report += "За выбранный период закрытых смен нет.\n\n"
+    report += f"Итого общая сумма: {total_salary} руб."
     return report.rstrip()

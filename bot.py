@@ -1,3 +1,5 @@
+"""Точка входа и обработчики Telegram-бота: авторизация, сотрудники, смены и отчеты."""
+
 import logging
 import calendar
 import re
@@ -14,16 +16,19 @@ ADD_EMPLOYEE, GET_NAME, GET_SCHEDULE_DATE, GET_SCHEDULE_EMPLOYEE, GET_SCHEDULE_T
 SCHEDULE_MENU, SCHEDULE_SELECT_ENTRY, SCHEDULE_END_TIME, SCHEDULE_DELETE_CONFIRM = range(11, 15)
 SCHEDULE_DELETE_INVALID_SELECT, SCHEDULE_DELETE_INVALID_CONFIRM = range(15, 17)
 
+# --- Состояние диалогов и общие подписи ---
 def clear_schedule_state(context):
-    for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
+    """Очищает временные данные диалога управления расписанием."""
+    for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_selected_ids', 'schedule_delete_employee_options', 'schedule_delete_employee', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
         context.user_data.pop(key, None)
 
 MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
 MENU_BUTTON_PATTERN = '^(?:' + '|'.join((re.escape(label) for label in MENU_BUTTONS)) + ')$'
 
 
+# --- Роли, авторизация и идентификация ---
 def employee_prompt_label(employee):
-    """Return surname, optional admin marker, and the prompt arrow."""
+    """Формирует короткую подпись сотрудника с отметкой администратора."""
     if not isinstance(employee, dict):
         return '\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a >'
     if (config.OWNER_ID is not None and employee.get('user_id') == config.OWNER_ID) or employee.get('role') == 'owner':
@@ -32,14 +37,12 @@ def employee_prompt_label(employee):
     if not surname:
         full_name = ' '.join(str(employee.get(key) or '').strip() for key in ('first_name', 'name')).strip()
         surname = full_name.split()[0] if full_name else '\u0411\u0435\u0437 \u0444\u0430\u043c\u0438\u043b\u0438\u0438'
-    role = employee.get('role')
-    if role is None:
-        role = 'admin' if employee.get('is_admin') is True else 'employee'
+    role = employee.get('role') or 'employee'
     suffix = ' (\u0430\u0434\u043c\u0438\u043d)' if role == 'admin' else ''
     return f'{surname}{suffix} >'
 
 def schedule_entry_prompt_label(entry):
-    """Return the surname and role for a schedule row."""
+    """Определяет подпись сотрудника для строки расписания."""
     if entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}':
         return '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446 >'
     employee = get_employee_by_user_id(entry.get('user_id')) if entry.get('user_id') is not None else None
@@ -52,7 +55,7 @@ def schedule_entry_prompt_label(entry):
 
 
 def parse_number_selection(value, max_number):
-    """Parse comma-separated numbers and inclusive ranges, e.g. 1,3,5 or 1-4."""
+    """Разбирает номера, списки и включительные диапазоны; возвращает None при ошибке."""
     if not isinstance(value, str) or not value.strip() or not isinstance(max_number, int) or max_number < 1:
         return None
     selected = set()
@@ -77,7 +80,7 @@ def parse_number_selection(value, max_number):
 
 
 def parse_schedule_days(value, reference_date=None):
-    """Convert day numbers to ISO dates in the reference month."""
+    """Преобразует номера дней выбранного месяца в даты ISO YYYY-MM-DD."""
     reference_date = reference_date or date.today()
     days_in_month = calendar.monthrange(reference_date.year, reference_date.month)[1]
     days = parse_number_selection(value, days_in_month)
@@ -87,7 +90,7 @@ def parse_schedule_days(value, reference_date=None):
 
 
 def current_user_prompt_label(user, employee=None, role=None):
-    """Return a compact current-user label including their role."""
+    """Формирует подпись текущего пользователя с учетом его роли."""
     role = role if role is not None else get_user_role(user.id)
     if role == 'owner':
         return '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446 >'
@@ -97,7 +100,7 @@ def current_user_prompt_label(user, employee=None, role=None):
     return f'{getattr(user, "first_name", None) or "\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c"} >'
 
 def get_user_role(user_id):
-    '''Возвращает owner/admin/employee либо None, если доступ запрещен.'''
+    """Возвращает роль пользователя; неактивным и неизвестным пользователям доступ не дает."""
 
     if config.OWNER_ID is not None and user_id == config.OWNER_ID:
         return 'owner'
@@ -110,10 +113,11 @@ def get_user_role(user_id):
             return role
 
 def is_admin_role(role):
+    """Проверяет, относится ли роль к владельцу или администратору."""
     return role in {'admin', 'owner'}
 
 async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Повторно проверяет права на каждом шаге административного диалога.'''
+    """Повторно проверяет административные права перед выполнением действия."""
 
     user = update.effective_user
     role = get_user_role(user.id) if user else None
@@ -126,15 +130,16 @@ async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return True
 
 def audit_action(update, action, target_user_id=None, details=None):
-    """Write a successful operation with the authenticated actor's identity and role."""
+    """Записывает действие текущего пользователя в журнал аудита."""
 
     user = update.effective_user
     if not user:
         return False
     return log_action(actor_user_id=user.id, actor_role=get_user_role(user.id), action=action, target_user_id=target_user_id, details=details)
 
+# --- Команды и основное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start."""
+    """Обрабатывает /start и показывает меню согласно роли пользователя."""
     user = update.effective_user
     employee = get_employee_by_user_id(user.id)
     role = get_user_role(user.id)
@@ -157,13 +162,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
         return
+    context.user_data['awaiting_phone'] = True
     await update.message.reply_text(
         '\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c! \u041f\u043e\u0434\u0435\u043b\u0438\u0442\u0435\u0441\u044c \u0441\u0432\u043e\u0438\u043c \u043a\u043e\u043d\u0442\u0430\u043a\u0442\u043e\u043c \u0438\u043b\u0438 \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u043e\u043c\u0435\u0440 \u0432 \u0444\u043e\u0440\u043c\u0430\u0442\u0435 +7XXXXXXXXXX.',
         reply_markup=get_phone_keyboard()
     )
 
 async def complete_phone_identification(update: Update, phone_number: str):
-    '''Проверяет номер и привязывает сотрудника к Telegram-аккаунту.'''
+    """Проверяет номер телефона и безопасно привязывает сотрудника к Telegram ID."""
 
     user = update.effective_user
     employee = get_employee_by_phone(phone_number)
@@ -178,12 +184,13 @@ async def complete_phone_identification(update: Update, phone_number: str):
         messages = {'phone_already_bound': 'Этот номер уже привязан к другому аккаунту. Обратитесь к владельцу.', 'user_already_bound': 'Ваш Telegram уже привязан к другой записи. Обратитесь к владельцу.', 'not_found': 'Номер не найден. Проверьте его или обратитесь к владельцу.'}
         await update.message.reply_text(messages.get(reason, 'Не удалось привязать номер. Обратитесь к владельцу.'), reply_markup=ReplyKeyboardRemove())
         return
+    context.user_data.pop('awaiting_phone', None)
     role = get_user_role(user.id)
     audit_action(update, 'employee_linked', target_user_id=user.id, details={'employee_name': ' '.join((part for part in (employee.get('last_name'), employee.get('first_name')) if part)), 'phone_number': employee.get('phone_number')})
     await update.message.reply_text(f'\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c, {current_user_prompt_label(user, employee, role)}!', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show Telegram ID, full name, and current role."""
+    """Показывает Telegram ID, ФИО и роль; затем восстанавливает главное меню."""
     user = update.effective_user
     if not user:
         await update.message.reply_text('\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f Telegram.')
@@ -197,11 +204,12 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role_name = role_names.get(role, '\u043d\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u043d / \u0434\u043e\u0441\u0442\u0443\u043f \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442')
     label = current_user_prompt_label(user, employee, role)
     await update.message.reply_text(
-        f'\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: {label}\n\u0424\u0418\u041e: {full_name}\nTelegram ID: {user.id}\n\u0420\u043e\u043b\u044c: {role_name}'
+        f'\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: {label}\n\u0424\u0418\u041e: {full_name}\nTelegram ID: {user.id}\n\u0420\u043e\u043b\u044c: {role_name}',
+        reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner')
     )
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Обработчик получения собственного контакта сотрудника.'''
+    """Принимает контакт Telegram и разрешает привязку только собственного контакта."""
 
     user = update.effective_user
     contact = update.message.contact
@@ -211,7 +219,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await complete_phone_identification(update, contact.phone_number)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Обработчик нажатий на кнопки главного меню.'''
+    """Обрабатывает основные кнопки: смены, время, расписание, сотрудников и отчеты."""
 
     text = update.message.text
     user = update.effective_user
@@ -219,27 +227,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = get_user_role(user.id)
     if role is None:
         phone = text.strip()
-        if re.fullmatch('\\+7\\d{10}', phone):
+        if context.user_data.get('awaiting_phone') and re.fullmatch(r'\+?\d{7,15}', phone):
             await complete_phone_identification(update, phone)
-            return
-        await update.message.reply_text('Поделитесь своим контактом или введите номер в формате +7XXXXXXXXXX.', reply_markup=get_phone_keyboard())
+        else:
+            await start(update, context)
         return
     if text == 'Начать смену':
-        if not employee:
+        if not employee and role != 'owner':
             await update.message.reply_text('Для учета рабочего времени сначала привяжите свой номер телефона через /start.')
             return
         active_shift = get_active_shift(user.id)
         if active_shift:
             await update.message.reply_text('У вас уже есть активная смена.')
             return
-        start_shift(user.id)
+        start_shift(user.id, employee_name=current_user_prompt_label(user, employee, role))
         active_shift = get_active_shift(user.id)
         audit_action(update, 'shift_started', target_user_id=user.id, details={'shift_start': active_shift.get('shift_start') if active_shift else None})
         start_time = datetime.now().strftime('%H:%M')
         await update.message.reply_text(f'✅ Смена начата в {start_time}')
         return
     if text == 'Закончить смену':
-        if not employee:
+        if not employee and role != 'owner':
             await update.message.reply_text('Для учета рабочего времени сначала привяжите свой номер телефона через /start.')
             return
         active_shift = get_active_shift(user.id)
@@ -249,7 +257,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_time = datetime.strptime(active_shift['shift_start'], '%Y-%m-%d %H:%M:%S')
         now = datetime.now()
         if (now - start_time).total_seconds() < 3600:
-            await update.message.reply_text('❌ Нельзя закрыть смену раньше, чем через 1 час после начала.')
+            await update.message.reply_text('\u274c \u041d\u0435\u043b\u044c\u0437\u044f \u0437\u0430\u043a\u0440\u044b\u0442\u044c \u0441\u043c\u0435\u043d\u0443 \u0440\u0430\u043d\u044c\u0448\u0435, \u0447\u0435\u043c \u0447\u0435\u0440\u0435\u0437 1 \u0447\u0430\u0441 \u043f\u043e\u0441\u043b\u0435 \u043d\u0430\u0447\u0430\u043b\u0430.')
             return
         if end_shift(user.id):
             audit_action(update, 'shift_ended', target_user_id=user.id, details={'shift_start': active_shift.get('shift_start'), 'shift_end': now.strftime('%Y-%m-%d %H:%M:%S')})
@@ -263,19 +271,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(schedule_message)
         return
     if text == 'Мое время':
-        if not employee:
+        if not employee and role != 'owner':
             await update.message.reply_text('Для просмотра личного времени сначала привяжите свой номер телефона через /start.')
             return
         shifts = get_user_shifts(user.id, 7)
         total_time = calculate_work_time(shifts)
-        await update.message.reply_text(f'⏱ Ваше время за последнюю неделю: {total_time}')
+        salary = calculate_salary(shifts)
+        await update.message.reply_text(f'⏱ Ваше время за последнюю неделю: {total_time}\n💵 Ваша зарплата: {salary} руб.')
         return
     if text == 'Добавить сотрудника':
+        context.user_data['menu_parent'] = 'employees'
         if not await require_admin(update, context):
             return
         await update.message.reply_text('Введите номер телефона нового сотрудника в формате +79123456789:', reply_markup=get_dialog_keyboard())
         return ADD_EMPLOYEE
     if text == 'Управление графиком':
+        context.user_data['menu_parent'] = 'main'
         if not await require_admin(update, context):
             return
         clear_schedule_state(context)
@@ -301,18 +312,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, reply_markup=get_main_keyboard(True, role == 'owner'))
         return
     if text in {'Редактировать сотрудника', 'Назначить/снять администратора'}:
+        context.user_data['menu_parent'] = 'employees'
         if role != 'owner':
             await update.message.reply_text('❌ Только владелец может изменять роли сотрудников.')
             return
-        employees = [item for item in get_all_employees() if item.get('user_id') is not None if item.get('status', 'active') == 'active']
+        employees = [item for item in get_all_employees() if item.get('user_id') != config.OWNER_ID and item.get('role') != 'owner' and item.get('status', 'active') == 'active' and item.get('phone_number')]
         if not employees:
-            await update.message.reply_text('Нет активных зарегистрированных сотрудников.')
-            return
-        employees = [item for item in employees if item.get('user_id') != config.OWNER_ID]
-        if not employees:
-            await update.message.reply_text('Нет сотрудников, которым можно изменить роль.')
-            return
-        context.user_data['editable_employee_ids'] = [item['user_id'] for item in employees]
+            await update.message.reply_text('Нет активных сотрудников, которым можно изменить роль.', reply_markup=get_employee_management_keyboard(True))
+            return ConversationHandler.END
+        context.user_data['editable_employee_phones'] = [item['phone_number'] for item in employees]
         lines = ['Выберите сотрудника, введя номер из списка:']
         for index, item in enumerate(employees, 1):
             name = ' '.join((part for part in (item.get('last_name'), item.get('first_name')) if part)) or 'Имя не указано'
@@ -320,6 +328,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
         return EDIT_EMPLOYEE_SELECT
     if text == 'Редактировать':
+        context.user_data['menu_parent'] = 'main'
         if not await require_admin(update, context):
             return
         employees = get_all_employees()
@@ -337,6 +346,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('\n'.join(lines), reply_markup=get_employee_management_keyboard(role == 'owner'))
         return
     if text in {'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи'}:
+        context.user_data['menu_parent'] = 'employees'
         if not await require_admin(update, context):
             return
         action = {'Изменить данные': 'edit', 'Уволить сотрудника': 'dismiss', 'Удалить сотрудника': 'delete', 'Удалить ошибочные записи': 'delete_invalid'}[text]
@@ -383,28 +393,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(report, reply_markup=get_main_keyboard(True, role == 'owner'))
         return
     if text == 'На главную' or text == BACK_BUTTON:
-        await update.message.reply_text('Главное меню:', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
+        await cancel(update, context)
+        return ConversationHandler.END
+    await start(update, context)
 
+# --- Назначение ролей сотрудников ---
 async def select_employee_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Выбор активного сотрудника владельцем для изменения роли.'''
+    """Показывает владельцу список сотрудников для изменения их роли."""
 
     if get_user_role(update.effective_user.id) != 'owner':
         await update.message.reply_text('❌ Недостаточно прав. Операция отменена.')
-        context.user_data.pop('editable_employee_ids', None)
         return ConversationHandler.END
-    employee_ids = context.user_data.get('editable_employee_ids', [])
+    employee_phones = context.user_data.get('editable_employee_phones', [])
     value = update.message.text.strip()
-    if not value.isdigit() or not 1 <= int(value) <= len(employee_ids):
+    if not value.isdigit() or not 1 <= int(value) <= len(employee_phones):
         await update.message.reply_text('Введите номер сотрудника из списка или нажмите «Назад в меню».')
         return EDIT_EMPLOYEE_SELECT
-    employee_id = employee_ids[int(value) - 1]
-    employee = get_employee_by_user_id(employee_id)
-    if not employee or employee.get('status', 'active') != 'active':
+    phone = employee_phones[int(value) - 1]
+    employee = get_employee_by_phone(phone)
+    if not employee or employee.get('status', 'active') != 'active' or employee.get('role') == 'owner' or employee.get('user_id') == config.OWNER_ID:
         await update.message.reply_text('Сотрудник больше не доступен для изменения.')
-        context.user_data.pop('editable_employee_ids', None)
+        context.user_data.pop('editable_employee_phones', None)
         return ConversationHandler.END
-    context.user_data['editing_employee_id'] = employee_id
-    current_role = employee.get('role', 'employee')
+    context.user_data['editing_employee_phone'] = phone
+    current_role = employee.get('role') or 'employee'
     if current_role == 'admin':
         prompt = 'У сотрудника сейчас роль администратора.\nВведите 1, чтобы снять права администратора, или 2, чтобы оставить без изменений.'
     else:
@@ -413,10 +425,9 @@ async def select_employee_for_edit(update: Update, context: ContextTypes.DEFAULT
     return EDIT_EMPLOYEE_ROLE
 
 async def set_selected_employee_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняет выбранную роль сотрудника после проверки прав владельца."""
     if get_user_role(update.effective_user.id) != 'owner':
         await update.message.reply_text('❌ Только владелец может изменять роли сотрудников.')
-        context.user_data.pop('editing_employee_id', None)
-        context.user_data.pop('editable_employee_ids', None)
         return ConversationHandler.END
     choice = update.message.text.strip()
     if choice not in {'1', '2'}:
@@ -425,27 +436,30 @@ async def set_selected_employee_role(update: Update, context: ContextTypes.DEFAU
     if choice == '2':
         result = 'Изменения не внесены.'
     else:
-        employee_id = context.user_data.get('editing_employee_id')
-        employee = get_employee_by_user_id(employee_id) if employee_id is not None else None
-        if not employee or employee.get('status', 'active') != 'active' or employee_id == config.OWNER_ID:
+        phone = context.user_data.get('editing_employee_phone')
+        employee = get_employee_by_phone(phone) if phone else None
+        if not employee or employee.get('status', 'active') != 'active' or employee.get('user_id') == config.OWNER_ID or employee.get('role') == 'owner':
             result = 'Сотрудник больше не доступен для изменения роли.'
         else:
-            old_role = employee.get('role', 'employee')
+            old_role = employee.get('role') or 'employee'
             new_role = 'employee' if old_role == 'admin' else 'admin'
-            changed, reason = set_employee_role(employee_id, new_role)
+            changed, reason = set_employee_role_by_phone(phone, new_role, protected_user_id=config.OWNER_ID)
             if changed:
-                audit_action(update, 'employee_role_changed', target_user_id=employee_id, details={'old_role': old_role, 'new_role': new_role})
+                audit_action(update, 'employee_role_changed', target_user_id=employee.get('user_id'), details={'old_role': old_role, 'new_role': new_role, 'phone_number': phone})
             result = '✅ Роль успешно изменена: ' + ('администратор.' if new_role == 'admin' else 'обычный сотрудник.') if changed else '❌ Не удалось изменить роль: ' + reason
-    context.user_data.pop('editing_employee_id', None)
-    context.user_data.pop('editable_employee_ids', None)
+    context.user_data.pop('editing_employee_phone', None)
+    context.user_data.pop('editable_employee_phones', None)
     await update.message.reply_text(result, reply_markup=get_employee_management_keyboard(True))
     return ConversationHandler.END
 
+# --- Добавление и управление сотрудниками ---
 def clear_manage_employee_state(context):
+    """Удаляет временные данные диалога управления сотрудниками."""
     for key in ('manage_employee_action', 'manage_employee_indexes', 'manage_employee_invalid_records', 'manage_employee_phones', 'manage_employee_phone', 'manage_employee_first_name', 'manage_employee_last_name'):
         context.user_data.pop(key, None)
 
 async def manage_employee_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет выбранную запись и запускает соответствующее действие над сотрудником."""
     if not await require_admin(update, context):
         clear_manage_employee_state(context)
         return ConversationHandler.END
@@ -488,6 +502,7 @@ async def manage_employee_select(update: Update, context: ContextTypes.DEFAULT_T
     return MANAGE_EMPLOYEE_CONFIRM
 
 async def manage_employee_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает и проверяет новое ФИО выбранного сотрудника."""
     if not await require_admin(update, context):
         clear_manage_employee_state(context)
         return ConversationHandler.END
@@ -502,6 +517,7 @@ async def manage_employee_name(update: Update, context: ContextTypes.DEFAULT_TYP
     return MANAGE_EMPLOYEE_PHONE
 
 async def manage_employee_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает новый номер и проверяет, что он не занят другой записью."""
     if not await require_admin(update, context):
         clear_manage_employee_state(context)
         return ConversationHandler.END
@@ -531,6 +547,7 @@ async def manage_employee_phone(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждает или отменяет изменение, увольнение либо удаление сотрудника."""
     if not await require_admin(update, context):
         clear_manage_employee_state(context)
         return ConversationHandler.END
@@ -570,7 +587,7 @@ async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 async def add_employee_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Первый шаг добавления сотрудника: номер телефона.'''
+    """Первый шаг добавления сотрудника: проверяет и сохраняет номер телефона."""
 
     if not await require_admin(update, context):
         return ConversationHandler.END
@@ -586,7 +603,7 @@ async def add_employee_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return GET_NAME
 
 async def add_employee_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Второй шаг добавления сотрудника: ФИО.'''
+    """Второй шаг добавления сотрудника: принимает ФИО и создает запись."""
 
     if not await require_admin(update, context):
         return ConversationHandler.END
@@ -606,14 +623,15 @@ async def add_employee_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = name_parts[1] if len(name_parts) > 1 else name_parts[0]
     if add_employee(None, phone, first_name, last_name):
         audit_action(update, 'employee_added', details={'employee_name': full_name, 'phone_number': phone})
-        await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!', reply_markup=get_main_keyboard(True, get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
     else:
-        await update.message.reply_text('❌ Сотрудник с таким номером телефона уже существует.', reply_markup=get_main_keyboard(True, get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text('❌ Сотрудник с таким номером телефона уже существует.', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
     context.user_data.pop('new_employee_phone', None)
     return ConversationHandler.END
 
+# --- Управление расписанием ---
 def _schedule_employee_options(role):
-    '''Возвращает активных сотрудников и, только владельцу, самого владельца.'''
+    """Формирует список сотрудников, которым текущая роль может назначать смены."""
 
     options = []
     seen = set()
@@ -631,7 +649,7 @@ def _schedule_employee_options(role):
             continue
         seen.add(employee_id)
         name = ' '.join((part for part in (employee.get('last_name'), employee.get('first_name')) if part)) or 'Имя не указано'
-        options.append({'employee_id': employee_id, 'user_id': employee.get('user_id'), 'employee_name': name, 'employee_phone': phone, 'role': employee.get('role', 'admin' if employee.get('is_admin') is True else 'employee')})
+        options.append({'employee_id': employee_id, 'user_id': employee.get('user_id'), 'employee_name': name, 'employee_phone': phone, 'role': employee.get('role') or 'employee'})
         continue
     options.sort(key=(lambda item: item['employee_name'].casefold()))
     if role == 'owner' and config.OWNER_ID is not None:
@@ -639,6 +657,7 @@ def _schedule_employee_options(role):
     return options
 
 def _schedule_entry_label(entry):
+    """Форматирует дату, сотрудника и время одной записи расписания."""
     try:
         date_label = datetime.strptime(entry['date'], '%Y-%m-%d').strftime('%d.%m.%Y')
     except (KeyError, TypeError, ValueError):
@@ -646,18 +665,24 @@ def _schedule_entry_label(entry):
     return f'{date_label} {chr(0x2014)} {schedule_entry_prompt_label(entry)} {chr(0x2014)} {entry.get("start_time", "?")}{chr(0x2013)}{entry.get("end_time", "?")}'
 
 def _manageable_schedule_entries(role):
+    """Возвращает сортированный список смен, доступных текущей роли для управления."""
     entries = get_schedule()
     if role != 'owner':
         entries = [item for item in entries if item.get('user_id') != config.OWNER_ID if item.get('employee_id') != f'owner:{config.OWNER_ID}']
     return sorted(entries, key=(lambda item: (item.get('date', ''), item.get('start_time', ''), item.get('employee_name', ''))))
 
 async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Choose adding, editing, deleting, or cleaning schedule entries."""
+    """Обрабатывает выбор действия в меню управления расписанием."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     clear_schedule_state(context)
     role = get_user_role(update.effective_user.id)
     action = update.message.text.strip()
+    if action == BACK_BUTTON:
+        context.user_data['menu_parent'] = 'main'
+        await cancel(update, context)
+        return ConversationHandler.END
+    context.user_data['menu_parent'] = 'schedule'
     if action == '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443':
         context.user_data['schedule_action'] = 'add'
         month = datetime.now()
@@ -701,20 +726,80 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
     if not entries:
         await update.message.reply_text('\u041d\u0435\u0442 \u0441\u043c\u0435\u043d, \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438.', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
+    if context.user_data['schedule_action'] == 'delete':
+        current_month = datetime.now().strftime('%Y-%m-')
+        entries = [item for item in entries if str(item.get('date', '')).startswith(current_month)]
+        if not entries:
+            await update.message.reply_text('В текущем месяце нет смен для удаления.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        employees_by_id = {}
+        employee_records = get_all_employees()
+        for entry in entries:
+            employee_id = entry.get('employee_id')
+            if not employee_id or employee_id in employees_by_id:
+                continue
+            phone_key = str(employee_id).removeprefix('phone:')
+            employee_record = next((item for item in employee_records if normalize_phone(item.get('phone_number')) == phone_key), None)
+            is_owner = employee_id == f'owner:{config.OWNER_ID}'
+            employees_by_id[employee_id] = {
+                'employee_id': employee_id, 'user_id': entry.get('user_id'),
+                'employee_name': 'Владелец' if is_owner else (entry.get('employee_name') or 'Имя не указано'),
+                'employee_phone': entry.get('employee_phone'),
+                'role': 'owner' if is_owner else (employee_record or {}).get('role', 'employee')
+            }
+        options = sorted(employees_by_id.values(), key=lambda item: item['employee_name'].casefold())
+        context.user_data['schedule_delete_employee_options'] = options
+        lines = ['Выберите сотрудника, чьи смены нужно удалить:']
+        for number, item in enumerate(options, 1):
+            suffix = ' (админ)' if item.get('role') == 'admin' else ''
+            phone_label = f' — {item["employee_phone"]}' if item.get('employee_phone') else ''
+            lines.append(f'{number}. {item["employee_name"]}{suffix}{phone_label}')
+        await update.message.reply_text('\
+'.join(lines), reply_markup=get_dialog_keyboard())
+        return GET_SCHEDULE_EMPLOYEE
+
     context.user_data['schedule_entry_ids'] = [item['id'] for item in entries]
-    lines = ['\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u043c\u0435\u043d\u0443, \u0432\u0432\u0435\u0434\u044f \u0435\u0451 \u043d\u043e\u043c\u0435\u0440:']
+    lines = ['Выберите смену, введя её номер:']
     lines.extend(
-        f'{index}. {schedule_entry_prompt_label(item)} \u2014 {item.get("date")} \u2014 {item.get("start_time")}\u2013{item.get("end_time")}'
+        f'{index}. {schedule_entry_prompt_label(item)} — {item.get("date")} — {item.get("start_time")}–{item.get("end_time")}'
         for index, item in enumerate(entries, 1)
     )
-    await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+    await update.message.reply_text('\
+'.join(lines), reply_markup=get_dialog_keyboard())
     return SCHEDULE_SELECT_ENTRY
 
 async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет выбор смены или набора смен для дальнейшего изменения/удаления."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     value = update.message.text.strip()
     entry_ids = context.user_data.get('schedule_entry_ids', [])
+    action = context.user_data.get('schedule_action')
+    if action == 'delete':
+        selected_numbers = parse_number_selection(value, len(entry_ids))
+        if selected_numbers is None:
+            await update.message.reply_text('Некорректный выбор. Введите номера смен через запятую (например 1,3,5) или диапазон (например 1-5).')
+            return SCHEDULE_SELECT_ENTRY
+        selected_ids = [entry_ids[number - 1] for number in selected_numbers]
+        entries = [get_schedule_entry(schedule_id) for schedule_id in selected_ids]
+        if any(entry is None for entry in entries):
+            clear_schedule_state(context)
+            await update.message.reply_text('Одна или несколько смен уже недоступны. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        role = get_user_role(update.effective_user.id)
+        if role != 'owner' and any(
+            entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}'
+            for entry in entries
+        ):
+            clear_schedule_state(context)
+            await update.message.reply_text('❌ Администратор не может удалять смены владельца.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        context.user_data['schedule_selected_ids'] = selected_ids
+        lines = [f'Будут удалены смены: {len(entries)}.']
+        lines.extend(f'{number}. {_schedule_entry_label(entry)}' for number, entry in enumerate(entries, 1))
+        lines.append('Введите 1 для подтверждения удаления или 2 для отмены.')
+        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        return SCHEDULE_DELETE_CONFIRM
     if not value.isdigit() or not 1 <= int(value) <= len(entry_ids):
         await update.message.reply_text('Введите номер смены из списка.')
         return SCHEDULE_SELECT_ENTRY
@@ -723,23 +808,22 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
     role = get_user_role(update.effective_user.id)
     if not entry:
         clear_schedule_state(context)
-        await update.message.reply_text('Эта запись уже недоступна. Откройте управление расписанием заново.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выбранная смена уже недоступна. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
     is_owner_shift = entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}'
     if role != 'owner' and is_owner_shift:
         await update.message.reply_text('❌ Администратор не может изменять смены владельца.')
         clear_schedule_state(context)
-        await update.message.reply_text('Выберите другое действие:', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выберите действие:', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
     context.user_data['schedule_selected_id'] = schedule_id
-    if context.user_data.get('schedule_action') == 'delete':
-        await update.message.reply_text(f'Удалить эту смену?\n{_schedule_entry_label(entry)}\n\nВведите 1 для подтверждения или 2 для отмены.', reply_markup=get_dialog_keyboard())
-        return SCHEDULE_DELETE_CONFIRM
+    context.user_data['schedule_selected_ids'] = [schedule_id]
     context.user_data['schedule_action'] = 'edit'
-    await update.message.reply_text(f'Изменение смены:\n{_schedule_entry_label(entry)}\n\nВведите новую дату в формате ДД.ММ.ГГГГ:', reply_markup=get_dialog_keyboard())
+    await update.message.reply_text(f'Изменение смены:\n{_schedule_entry_label(entry)}\n\nВведите день/дни текущего месяца ({datetime.now():%m.%Y}), например 5 или 13,15,17 или диапазон 13-15:', reply_markup=get_dialog_keyboard())
     return GET_SCHEDULE_DATE
 
 async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждает удаление выбранных записей и фиксирует операцию в аудите."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     choice = update.message.text.strip()
@@ -750,12 +834,13 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
         clear_schedule_state(context)
         await update.message.reply_text('Удаление отменено.', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
-    schedule_id = context.user_data.get('schedule_selected_id')
+    schedule_ids = context.user_data.get('schedule_selected_ids') or [context.user_data.get('schedule_selected_id')]
     role = get_user_role(update.effective_user.id)
-    success, reason, deleted = delete_schedule_entry(schedule_id, actor_user_id=update.effective_user.id, actor_role=role, owner_user_id=config.OWNER_ID)
+    success, reason, deleted = delete_schedule_entries(schedule_ids, actor_user_id=update.effective_user.id, actor_role=role, owner_user_id=config.OWNER_ID)
     if success:
-        audit_action(update, 'schedule_entry_deleted', target_user_id=deleted.get('user_id'), details={'schedule_id': deleted.get('id'), 'employee_id': deleted.get('employee_id'), 'employee_name': deleted.get('employee_name'), 'date': deleted.get('date'), 'start_time': deleted.get('start_time'), 'end_time': deleted.get('end_time')})
-        message = '✅ Смена удалена из расписания.'
+        for item in deleted:
+            audit_action(update, 'schedule_entry_deleted', target_user_id=item.get('user_id'), details={'schedule_id': item.get('id'), 'employee_id': item.get('employee_id'), 'employee_name': item.get('employee_name'), 'date': item.get('date'), 'start_time': item.get('start_time'), 'end_time': item.get('end_time')})
+        message = f'✅ Удалено смен: {len(deleted)}.'
     elif reason == 'owner_protected':
         message = '❌ Администратор не может удалять смены владельца.'
     elif reason == 'invalid_schedule_data':
@@ -767,31 +852,38 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
     return SCHEDULE_MENU
 
 async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет введенные дни месяца и определяет следующий шаг диалога."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     date_text = update.message.text.strip()
     action = context.user_data.get('schedule_action')
-    if action == 'add':
-        dates = parse_schedule_days(date_text, datetime.now().date())
-        if dates is None:
-            month = datetime.now()
-            days_in_month = calendar.monthrange(month.year, month.month)[1]
-            await update.message.reply_text(
-                f'\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0434\u043d\u0435\u0439. \u0414\u043b\u044f \u043c\u0435\u0441\u044f\u0446\u0430 {month:%m.%Y} \u0443\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u0430 \u043e\u0442 1 \u0434\u043e {days_in_month}: 13,15,17 \u0438\u043b\u0438 13-15.'
-            )
-            return GET_SCHEDULE_DATE
-        context.user_data['schedule_dates'] = dates
-        context.user_data['schedule_date'] = dates[0]
-    else:
-        try:
-            parsed_date = datetime.strptime(date_text, '%d.%m.%Y').date()
-            if parsed_date.strftime('%d.%m.%Y') != date_text:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text('\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u0430\u044f \u0434\u0430\u0442\u0430. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0444\u043e\u0440\u043c\u0430\u0442 \u0414\u0414.\u041c\u041c.\u0413\u0413\u0413\u0413, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 13.11.2026.')
-            return GET_SCHEDULE_DATE
-        context.user_data['schedule_date'] = parsed_date.isoformat()
-        context.user_data['schedule_dates'] = [parsed_date.isoformat()]
+    dates = parse_schedule_days(date_text, datetime.now().date())
+    if dates is None:
+        month = datetime.now()
+        days_in_month = calendar.monthrange(month.year, month.month)[1]
+        await update.message.reply_text(
+            f'Некорректный список дней. Для месяца {month:%m.%Y} укажите числа от 1 до {days_in_month}: 13,15,17 или 13-15.'
+        )
+        return GET_SCHEDULE_DATE
+    context.user_data['schedule_dates'] = dates
+    context.user_data['schedule_date'] = dates[0]
+    if action == 'delete':
+        selected_employee = context.user_data.get('schedule_delete_employee') or {}
+        employee_id = selected_employee.get('employee_id')
+        matching = [entry for entry in _manageable_schedule_entries(get_user_role(update.effective_user.id))
+                    if entry.get('employee_id') == employee_id and entry.get('date') in dates]
+        if not matching:
+            clear_schedule_state(context)
+            await update.message.reply_text('У выбранного сотрудника нет смен на указанные дни.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        matching.sort(key=lambda item: (item.get('date', ''), item.get('start_time', '')))
+        context.user_data['schedule_selected_ids'] = [item['id'] for item in matching]
+        lines = [f'Будут удалены смены сотрудника {selected_employee.get("employee_name", "")}: {len(matching)}.']
+        lines.extend(f'• {_schedule_entry_label(item)}' for item in matching)
+        lines.append('Введите 1 для подтверждения или 2 для отмены.')
+        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        return SCHEDULE_DELETE_CONFIRM
+
     role = get_user_role(update.effective_user.id)
     options = _schedule_employee_options(role)
     if not options:
@@ -813,9 +905,23 @@ async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return GET_SCHEDULE_EMPLOYEE
 
 async def schedule_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор сотрудника для добавления, изменения или удаления смен."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     value = update.message.text.strip()
+    if context.user_data.get('schedule_action') == 'delete':
+        options = context.user_data.get('schedule_delete_employee_options', [])
+        if not value.isdigit() or not 1 <= int(value) <= len(options):
+            await update.message.reply_text('Введите номер сотрудника из списка.')
+            return GET_SCHEDULE_EMPLOYEE
+        context.user_data['schedule_delete_employee'] = dict(options[int(value) - 1])
+        month = datetime.now()
+        await update.message.reply_text(
+            f'Введите день/дни текущего месяца ({month:%m.%Y}), например 5 или 13,15,17 или диапазон 13-15:',
+            reply_markup=get_dialog_keyboard()
+        )
+        return GET_SCHEDULE_DATE
+
     options = context.user_data.get('schedule_employee_options', [])
     if not value.isdigit() or not 1 <= int(value) <= len(options):
         await update.message.reply_text('Введите номер сотрудника из списка.')
@@ -826,27 +932,47 @@ async def schedule_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('❌ Администратор не может назначать или изменять смены владельца.')
         return GET_SCHEDULE_EMPLOYEE
     context.user_data['schedule_employee'] = selected
-    await update.message.reply_text('Введите время начала смены с точностью до часа, например 09:00:', reply_markup=get_dialog_keyboard())
+    await update.message.reply_text('Введите время начала: часы (9) или полный формат (09:30).', reply_markup=get_dialog_keyboard())
     return GET_SCHEDULE_TIME
 
+def normalize_schedule_time(value, allow_24=False):
+    """Проверяет часы и формат HH:MM/HH-MM; возвращает нормализованное HH:MM."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"\d{1,2}", value):
+        hour = int(value)
+        if 0 <= hour <= (24 if allow_24 else 23):
+            return "24:00" if hour == 24 else f"{hour:02d}:00"
+        return None
+    if re.fullmatch(r"\d{1,2}[:-]\d{2}", value):
+        hour, minute = map(int, re.split(r"[:-]", value))
+        if minute > 59 or hour > 24 or (hour == 24 and (minute != 0 or not allow_24)):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    return None
+
+
 async def schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет и сохраняет время начала смены."""
     if not await require_admin(update, context):
         return ConversationHandler.END
-    start_time = update.message.text.strip()
-    if schedule_time_to_minutes(start_time, allow_24=False) is None:
-        await update.message.reply_text('Некорректное время начала. Допускаются только целые часы от 00:00 до 23:00.')
+    start_time = normalize_schedule_time(update.message.text, allow_24=False)
+    if start_time is None:
+        await update.message.reply_text('Некорректное время начала. Введите часы (например, 9) или время HH:MM (например, 09:30).')
         return GET_SCHEDULE_TIME
     context.user_data['schedule_start_time'] = start_time
-    await update.message.reply_text('Введите время окончания смены (например, 18:00 или 24:00):', reply_markup=get_dialog_keyboard())
+    await update.message.reply_text('Введите время окончания: часы (15) или полный формат (15:30 / 24:00).', reply_markup=get_dialog_keyboard())
     return SCHEDULE_END_TIME
 
 async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет время окончания и сохраняет или обновляет смену."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     start_time = context.user_data.get('schedule_start_time')
-    end_time = update.message.text.strip()
-    if schedule_time_to_minutes(end_time, allow_24=True) is None:
-        await update.message.reply_text('\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0446\u0435\u043b\u044b\u0439 \u0447\u0430\u0441 \u043e\u0442 01:00 \u0434\u043e 24:00.')
+    end_time = normalize_schedule_time(update.message.text, allow_24=True)
+    if end_time is None:
+        await update.message.reply_text('Некорректное время окончания. Введите часы (например, 15) или время HH:MM (например, 15:30).')
         return SCHEDULE_END_TIME
     selected = context.user_data.get('schedule_employee')
     dates = context.user_data.get('schedule_dates') or ([context.user_data.get('schedule_date')] if context.user_data.get('schedule_date') else [])
@@ -893,24 +1019,46 @@ async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         message = '\n'.join(lines)
     elif action == 'edit':
-        date_value = dates[0]
-        success, reason, old_entry, new_entry = update_schedule_entry(
-            context.user_data.get('schedule_selected_id'), date_value, selected,
-            start_time, end_time, actor_user_id=update.effective_user.id,
-            actor_role=role, owner_user_id=config.OWNER_ID
+        schedule_id = context.user_data.get('schedule_selected_id')
+        success, reason, old_entry, first_new_entry = update_schedule_entry(
+            schedule_id, dates[0], selected, start_time, end_time,
+            actor_user_id=update.effective_user.id, actor_role=role,
+            owner_user_id=config.OWNER_ID
         )
         if success:
-            audit_action(update, 'schedule_entry_updated', target_user_id=new_entry.get('user_id'), details={
-                'schedule_id': new_entry.get('id'), 'employee_id': new_entry.get('employee_id'),
-                'employee_name': new_entry.get('employee_name'), 'old_date': old_entry.get('date'),
-                'new_date': new_entry.get('date'), 'old_start_time': old_entry.get('start_time'),
-                'new_start_time': new_entry.get('start_time'), 'old_end_time': old_entry.get('end_time'),
-                'new_end_time': new_entry.get('end_time')
+            audit_action(update, 'schedule_entry_updated', target_user_id=first_new_entry.get('user_id'), details={
+                'schedule_id': first_new_entry.get('id'), 'employee_id': first_new_entry.get('employee_id'),
+                'employee_name': first_new_entry.get('employee_name'), 'old_date': old_entry.get('date'),
+                'new_dates': dates, 'old_start_time': old_entry.get('start_time'),
+                'new_start_time': first_new_entry.get('start_time'), 'old_end_time': old_entry.get('end_time'),
+                'new_end_time': first_new_entry.get('end_time')
             })
-            message = '\u2705 \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b.'
+            created = [first_new_entry]
+            failures = []
+            for date_value in dates[1:]:
+                added_ok, add_reason, added_entry = add_to_schedule(
+                    date_value, selected, start_time, end_time,
+                    actor_user_id=update.effective_user.id, actor_role=role,
+                    owner_user_id=config.OWNER_ID
+                )
+                if added_ok:
+                    created.append(added_entry)
+                    audit_action(update, 'schedule_entry_added', target_user_id=added_entry.get('user_id'), details={
+                        'schedule_id': added_entry.get('id'), 'employee_id': added_entry.get('employee_id'),
+                        'employee_name': added_entry.get('employee_name'), 'date': added_entry.get('date'),
+                        'start_time': added_entry.get('start_time'), 'end_time': added_entry.get('end_time'),
+                        'source_schedule_id': schedule_id
+                    })
+                else:
+                    failures.append((date_value, add_reason))
+            message_lines = [f'✅ Создано/изменено смен: {len(created)} из {len(dates)}.']
+            if failures:
+                message_lines.append('Не удалось добавить смены:')
+                message_lines.extend(f'• {datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")}: {reason}' for day, reason in failures)
+            message = '\n'.join(message_lines)
         else:
-            messages = {'owner_protected': '\u274c \u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440 \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u0432\u0430\u0442\u044c \u0438\u043b\u0438 \u0438\u0437\u043c\u0435\u043d\u044f\u0442\u044c \u0441\u043c\u0435\u043d\u044b \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0430.', 'overlap': '\u274c \u0423 \u044d\u0442\u043e\u0433\u043e \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c \u0441\u043c\u0435\u043d\u0430, \u043f\u0435\u0440\u0435\u0441\u0435\u043a\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u0435\u043c.', 'invalid_date': '\u274c \u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u0430\u044f \u0434\u0430\u0442\u0430.', 'invalid_time': '\u274c \u0412\u0440\u0435\u043c\u044f \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0443\u043a\u0430\u0437\u0430\u043d\u043e \u0446\u0435\u043b\u044b\u043c\u0438 \u0447\u0430\u0441\u0430\u043c\u0438, \u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435 \u2014 \u043f\u043e\u0437\u0436\u0435 \u043d\u0430\u0447\u0430\u043b\u0430.', 'employee_not_available': '\u274c \u042d\u0442\u043e\u0442 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u0438\u043b\u0438 \u0435\u0433\u043e \u0434\u0430\u043d\u043d\u044b\u0435 \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c.', 'invalid_schedule_data': '\u274c \u0424\u0430\u0439\u043b \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u043f\u043e\u0432\u0440\u0435\u0436\u0434\u0451\u043d \u0438\u043b\u0438 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u0441\u0442\u0430\u0440\u044b\u0439 \u0444\u043e\u0440\u043c\u0430\u0442. \u0414\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0438\u0441\u0430\u043d\u044b.', 'not_found': '\u274c \u0417\u0430\u043f\u0438\u0441\u044c \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.', 'forbidden': '\u274c \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432 \u0434\u043b\u044f \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f.'}
-            message = messages.get(reason, '\u274c \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443.')
+            messages = {'owner_protected': '❌ Администратор не может создавать или изменять смены владельца.', 'overlap': '❌ У этого сотрудника уже есть смена, пересекающаяся с указанным временем.', 'invalid_date': '❌ Некорректная дата.', 'invalid_time': '❌ Время окончания должно быть позже времени начала.', 'employee_not_available': '❌ Этот сотрудник больше не активен или его данные изменились.', 'invalid_schedule_data': '❌ Файл расписания повреждён или содержит старый формат. Данные не перезаписаны.', 'not_found': '❌ Запись расписания больше не найдена.', 'forbidden': '❌ Недостаточно прав для изменения расписания.'}
+            message = messages.get(reason, '❌ Не удалось сохранить смену.')
     else:
         message = '\u274c \u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0441 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.'
     clear_schedule_state(context)
@@ -918,7 +1066,9 @@ async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SCHEDULE_MENU
 
 
+# --- Очистка ошибочных записей расписания ---
 async def schedule_invalid_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет выбор некорректных записей расписания для очистки."""
     if not await require_admin(update, context):
         clear_schedule_state(context)
         return ConversationHandler.END
@@ -938,6 +1088,7 @@ async def schedule_invalid_select(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def schedule_invalid_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждает безопасное удаление выбранных некорректных записей."""
     if not await require_admin(update, context):
         clear_schedule_state(context)
         return ConversationHandler.END
@@ -976,20 +1127,30 @@ async def schedule_invalid_confirm(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(message, reply_markup=get_schedule_management_keyboard())
     return SCHEDULE_MENU
 
+# --- Отмена диалогов и запуск приложения ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Отмена административного диалога.'''
-
+    """Отменяет текущий диалог, очищает его данные и возвращает в родительское меню."""
     role = get_user_role(update.effective_user.id)
     context.user_data.pop('new_employee_phone', None)
     clear_schedule_state(context)
-    context.user_data.pop('editable_employee_ids', None)
-    context.user_data.pop('editing_employee_id', None)
+    context.user_data.pop('editable_employee_phones', None)
+    context.user_data.pop('editing_employee_phone', None)
     clear_manage_employee_state(context)
-    await update.message.reply_text('Текущая операция отменена. Выберите нужный пункт меню ещё раз.', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
+    parent = context.user_data.get('menu_parent')
+    if parent == 'employees' and is_admin_role(role):
+        markup = get_employee_management_keyboard(role == 'owner')
+        message = 'Управление сотрудниками. Выберите действие:'
+    elif parent == 'schedule' and is_admin_role(role):
+        markup = get_schedule_management_keyboard()
+        message = 'Управление расписанием. Выберите действие:'
+    else:
+        markup = get_main_keyboard(is_admin_role(role), role == 'owner')
+        message = 'Главное меню:'
+    await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
 
 def main():
-    '''Запуск бота.'''
+    """Создает приложение Telegram, регистрирует обработчики и запускает polling."""
 
     if not config.BOT_TOKEN:
         raise RuntimeError('Не задан BOT_TOKEN. Создайте файл .env по образцу .env.example и укажите новый токен, полученный у @BotFather.')
