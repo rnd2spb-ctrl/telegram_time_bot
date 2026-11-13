@@ -1,3 +1,5 @@
+"""Тесты прав доступа, управления сотрудниками и операциями с расписанием."""
+
 import asyncio
 import json
 import tempfile
@@ -11,35 +13,46 @@ import database
 
 
 class FakeMessage:
+    """Имитирует сообщение Telegram и сохраняет отправленные ответы."""
     def __init__(self, text):
+        """Создает сообщение с текстом и списком ответов."""
         self.text = text
         self.replies = []
         self.contact = None
 
     async def reply_text(self, message, *args, **kwargs):
+        """Сохраняет текст ответа обработчика для проверки."""
         self.replies.append((str(message), kwargs))
 
 
 class FakeUser:
+    """Имитирует пользователя Telegram с ID и именем."""
     def __init__(self, user_id, first_name="Test", last_name="User"):
+        """Создает пользователя с Telegram ID и именем."""
         self.id = user_id
         self.first_name = first_name
         self.last_name = last_name
 
 
 class FakeUpdate:
+    """Имитирует объект обновления Telegram."""
     def __init__(self, text, user_id=200):
+        """Создает обновление с тестовым сообщением и пользователем."""
         self.message = FakeMessage(text)
         self.effective_user = FakeUser(user_id)
 
 
 class FakeContext:
+    """Имитирует контекст обработчика и его временные данные."""
     def __init__(self, user_data=None):
+        """Создает контекст с переданными временными данными."""
         self.user_data = user_data if user_data is not None else {}
 
 
 class AdminAndScheduleFeatureTests(unittest.TestCase):
+    """Проверки прав администратора, сотрудников и управления расписанием."""
     def test_number_selection_parser(self):
+        """Проверяет разбор одиночных номеров, списков и диапазонов."""
         self.assertEqual(bot.parse_number_selection("1,3,5", 5), [1, 3, 5])
         self.assertEqual(bot.parse_number_selection("1-4", 5), [1, 2, 3, 4])
         self.assertEqual(bot.parse_number_selection("1-3,5;7-8", 8), [1, 2, 3, 5, 7, 8])
@@ -51,6 +64,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIsNone(bot.parse_number_selection("1-6", 5))
 
     def test_schedule_days_parser_handles_month_length_and_leap_year(self):
+        """Проверяет даты с учетом длины месяца и високосного года."""
         self.assertEqual(
             bot.parse_schedule_days("13,15-17", date(2026, 11, 13)),
             ["2026-11-13", "2026-11-15", "2026-11-16", "2026-11-17"],
@@ -63,12 +77,14 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIsNone(bot.parse_schedule_days("31", date(2026, 11, 1)))
 
     def test_employee_prompt_labels_include_admin_role(self):
+        """Проверяет отображение отметки администратора в подписи."""
         ordinary = {"last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "employee"}
         admin = {"last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin"}
         self.assertEqual(bot.employee_prompt_label(ordinary), "\u0418\u0432\u0430\u043d\u043e\u0432 >")
         self.assertEqual(bot.employee_prompt_label(admin), "\u041f\u0435\u0442\u0440\u043e\u0432 (\u0430\u0434\u043c\u0438\u043d) >")
 
     def test_admin_can_see_other_admin_and_employee_in_management_list(self):
+        """Проверяет, что администратор видит и сотрудников, и других администраторов."""
         actor = {"user_id": 200, "phone_number": "+79990000002", "first_name": "Admin", "last_name": "Actor", "role": "admin", "status": "active"}
         other_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petya", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         employee = {"user_id": 202, "phone_number": "+79990000004", "first_name": "Ivan", "last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "employee", "status": "active"}
@@ -86,6 +102,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertNotIn("Owner Owner", message)
 
     def test_admin_can_select_another_admin_for_editing(self):
+        """Проверяет выбор другого администратора для редактирования."""
         target_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petya", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         update = FakeUpdate("1", 200)
         context = FakeContext({"manage_employee_action": "edit", "manage_employee_phones": [target_admin["phone_number"]]})
@@ -96,6 +113,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertEqual(context.user_data["manage_employee_phone"], target_admin["phone_number"])
 
     def test_whoami_reports_id_role_and_full_name(self):
+        """Проверяет вывод Telegram ID, ФИО и роли командой /whoami."""
         employee = {"user_id": 201, "first_name": "Petr", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         update = FakeUpdate("/whoami", 201)
         with patch.object(bot, "get_employee_by_user_id", return_value=employee), \
@@ -106,7 +124,35 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440", message)
         self.assertIn("\u041f\u0435\u0442\u0440\u043e\u0432 Petr", message)
 
+    def test_whoami_restores_role_appropriate_main_menu(self):
+        """Проверяет восстановление главного меню после /whoami."""
+        cases = (
+            ("owner", True, True),
+            ("admin", True, False),
+            ("employee", False, False),
+        )
+        for role, has_admin_access, is_owner in cases:
+            with self.subTest(role=role):
+                user_id = 100 if role == "owner" else 201
+                employee = {
+                    "user_id": user_id,
+                    "first_name": "Test",
+                    "last_name": "User",
+                    "role": role,
+                    "status": "active",
+                }
+                update = FakeUpdate("/whoami", user_id)
+                markup = object()
+                with patch.object(bot, "get_employee_by_user_id", return_value=employee):
+                    with patch.object(bot, "get_user_role", return_value=role):
+                        with patch.object(bot, "get_main_keyboard", return_value=markup) as keyboard:
+                            asyncio.run(bot.whoami(update, FakeContext()))
+
+                self.assertIs(update.message.replies[-1][1]["reply_markup"], markup)
+                keyboard.assert_called_once_with(has_admin_access, is_owner)
+
     def test_invalid_schedule_cleanup_flow_supports_list_and_confirmation(self):
+        """Проверяет выбор нескольких ошибочных записей и подтверждение удаления."""
         records = [
             {"index": 10 + i, "name": f"Record {i + 1}", "date": "2026-11-13", "start_time": "09:00", "end_time": "15:00"}
             for i in range(5)
@@ -136,6 +182,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("3", update.message.replies[-1][0])
 
     def test_batch_schedule_add_reports_partial_failures(self):
+        """Проверяет отчет о частичном успехе при пакетном добавлении смен."""
         employee = {"employee_id": "phone:79990000003", "user_id": 201, "employee_name": "\u041f\u0435\u0442\u0440\u043e\u0432 Petr", "employee_phone": "+79990000003"}
         dates = ["2026-11-13", "2026-11-15", "2026-11-17"]
         context = FakeContext({
@@ -160,6 +207,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertNotIn("schedule_dates", context.user_data)
 
     def test_schedule_employee_options_preserves_admin_role(self):
+        """Проверяет сохранение роли администратора в списке назначаемых сотрудников."""
         employees = [
             {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petya", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"},
             {"user_id": 202, "phone_number": "+79990000004", "first_name": "Ivan", "last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "employee", "status": "active"},
@@ -171,6 +219,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertEqual(by_id[202]["role"], "employee")
 
     def test_database_invalid_schedule_deletion_protects_valid_and_owner_records(self):
+        """Проверяет защиту корректных записей и смен владельца при очистке."""
         owner_id = 100
         admin_id = 200
         valid = {
@@ -209,6 +258,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
 
 
     def test_admin_can_edit_another_admin_account(self):
+        """Проверяет редактирование записи другого администратора."""
         target_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petya", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         context = FakeContext({
             "manage_employee_phone": target_admin["phone_number"],
@@ -227,6 +277,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b", update.message.replies[-1][0])
 
     def test_admin_can_dismiss_another_admin_account(self):
+        """Проверяет увольнение другого администратора."""
         target_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petya", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         context = FakeContext({"manage_employee_action": "dismiss", "manage_employee_phone": target_admin["phone_number"]})
         update = FakeUpdate("1", 200)
@@ -241,12 +292,17 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("\u0443\u0432\u043e\u043b\u0435\u043d", update.message.replies[-1][0])
 
     def test_main_registers_whoami_and_invalid_schedule_states(self):
+        """Проверяет регистрацию команды /whoami и состояний очистки расписания."""
         class FakeApplication:
+            """Имитирует приложение Telegram для проверки регистрации обработчиков."""
             def __init__(self):
+                """Создает тестовое сообщение с заданным текстом."""
                 self.handlers = []
             def add_handler(self, handler):
+                """Сохраняет зарегистрированный обработчик для проверки."""
                 self.handlers.append(handler)
             def run_polling(self):
+                """Имитирует запуск polling без подключения к Telegram."""
                 return None
 
         fake_app = FakeApplication()
@@ -266,6 +322,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
 
 
     def test_admin_can_assign_schedule_to_another_admin_in_real_temporary_database(self):
+        """Проверяет назначение смены другому администратору на временной базе."""
         actor = {"user_id": 200, "phone_number": "+79990000002", "first_name": "Admin", "last_name": "Actor", "role": "admin", "status": "active"}
         target = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petr", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         selected = {
@@ -292,7 +349,56 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
             self.assertEqual(overlap_reason, "overlap")
             self.assertEqual(len(database.get_schedule()), 1)
 
+    def test_delete_schedule_selection_accepts_multiple_numbers_and_ranges(self):
+        """Проверяет выбор нескольких смен номерами и диапазонами."""
+        entries = {
+            "id-1": {"id": "id-1", "user_id": 201, "employee_name": "Ivanov", "date": "2026-11-13", "start_time": "09:00", "end_time": "18:00"},
+            "id-2": {"id": "id-2", "user_id": 202, "employee_name": "Petrov", "date": "2026-11-14", "start_time": "09:00", "end_time": "18:00"},
+            "id-3": {"id": "id-3", "user_id": 203, "employee_name": "Sidorov", "date": "2026-11-15", "start_time": "09:00", "end_time": "18:00"},
+        }
+        for value, expected in (("1,3", ["id-1", "id-3"]), ("1-3", ["id-1", "id-2", "id-3"])):
+            update = FakeUpdate(value, 200)
+            context = FakeContext({"schedule_action": "delete", "schedule_entry_ids": ["id-1", "id-2", "id-3"]})
+            with patch.object(bot, "require_admin", new=AsyncMock(return_value=True)), \
+                 patch.object(bot, "get_user_role", return_value="admin"), \
+                 patch.object(bot, "get_schedule_entry", side_effect=lambda item_id: entries[item_id]), \
+                 patch.object(bot, "_schedule_entry_label", side_effect=lambda item: item["employee_name"]):
+                state = asyncio.run(bot.schedule_select_entry(update, context))
+            self.assertEqual(state, bot.SCHEDULE_DELETE_CONFIRM)
+            self.assertEqual(context.user_data["schedule_selected_ids"], expected)
+            self.assertIn("Введите 1 для подтверждения удаления", update.message.replies[-1][0])
+
+    def test_bulk_schedule_deletion_is_atomic_and_protects_owner_shifts(self):
+        """Проверяет пакетное удаление и защиту смен владельца."""
+        owner_id = 100
+        records = [
+            {"id": "employee-1", "date": "2026-11-13", "employee_id": "phone:79990000002", "user_id": 200, "employee_name": "Employee", "employee_phone": "+79990000002", "start_time": "09:00", "end_time": "18:00", "created_by_user_id": 200, "created_by_role": "admin", "created_at": "2026-11-13T08:00:00"},
+            {"id": "owner-1", "date": "2026-11-13", "employee_id": "owner:100", "user_id": owner_id, "employee_name": "Owner", "employee_phone": None, "start_time": "09:00", "end_time": "18:00", "created_by_user_id": owner_id, "created_by_role": "owner", "created_at": "2026-11-13T08:00:00"},
+            {"id": "employee-2", "date": "2026-11-14", "employee_id": "phone:79990000003", "user_id": 201, "employee_name": "Employee 2", "employee_phone": "+79990000003", "start_time": "09:00", "end_time": "18:00", "created_by_user_id": 200, "created_by_role": "admin", "created_at": "2026-11-13T08:00:00"},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(database, "DATA_DIR", temp_dir):
+            database.save_json("employees.json", [
+                {"user_id": 200, "phone_number": "+79990000002", "role": "admin", "status": "active"}
+            ])
+            database.save_json("schedule.json", records)
+            before = Path(temp_dir, "schedule.json").read_bytes()
+            success, reason, deleted = database.delete_schedule_entries(
+                ["employee-1", "owner-1"], 200, "admin", owner_id
+            )
+            self.assertFalse(success)
+            self.assertEqual(reason, "owner_protected")
+            self.assertEqual(deleted, [])
+            self.assertEqual(Path(temp_dir, "schedule.json").read_bytes(), before)
+            success, reason, deleted = database.delete_schedule_entries(
+                ["employee-1", "employee-2"], 200, "admin", owner_id
+            )
+            self.assertTrue(success)
+            self.assertEqual(reason, "ok")
+            self.assertEqual({item["id"] for item in deleted}, {"employee-1", "employee-2"})
+            self.assertEqual([item["id"] for item in database.get_schedule()], ["owner-1"])
+
     def test_schedule_confirmation_label_contains_admin_role(self):
+        """Проверяет отметку роли администратора в подтверждении смены."""
         entry = {
             "date": "2026-11-13", "employee_name": "Petrov Petr",
             "employee_id": "phone:79990000003", "employee_phone": "+79990000003",
@@ -305,6 +411,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("09:00\u201318:00", label)
 
     def test_employee_overview_preserves_dismissed_marker_and_role(self):
+        """Проверяет отображение уволенного сотрудника и его роли."""
         dismissed_admin = {
             "user_id": 201, "phone_number": "+79990000003", "first_name": "Petr",
             "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "dismissed"
@@ -321,25 +428,32 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
 
 
     def test_schedule_keyboard_exposes_invalid_cleanup_action(self):
+        """Проверяет наличие действия очистки ошибочных смен в меню."""
         markup = bot.get_schedule_management_keyboard()
         labels = [button.text for row in markup.keyboard for button in row]
         self.assertIn("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0435 \u0441\u043c\u0435\u043d\u044b", labels)
         self.assertIn("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0435 \u0441\u043c\u0435\u043d\u044b", bot.MENU_BUTTONS)
 
 
-    def test_explicit_employee_role_overrides_legacy_is_admin_flag(self):
-        employee = {"last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "employee", "is_admin": True}
+    def test_employee_prompt_label_uses_explicit_role_or_defaults_to_employee(self):
+        """Проверяет подпись сотрудника с указанной ролью и роль по умолчанию."""
         with patch.object(bot.config, "OWNER_ID", None):
-            self.assertEqual(bot.employee_prompt_label(employee), "\u0418\u0432\u0430\u043d\u043e\u0432 >")
-            unbound = {"last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "user_id": None, "role": "employee"}
-            self.assertEqual(bot.employee_prompt_label(unbound), "\u0418\u0432\u0430\u043d\u043e\u0432 >")
+            employee = {"last_name": "Ivanov", "role": "employee"}
+            admin = {"last_name": "Petrov", "role": "admin"}
+            unassigned = {"last_name": "Sidorov"}
+            self.assertEqual(bot.employee_prompt_label(employee), "Ivanov >")
+            self.assertEqual(bot.employee_prompt_label(admin), "Petrov (админ) >")
+            self.assertEqual(bot.employee_prompt_label(unassigned), "Sidorov >")
 
     def test_schedule_date_handler_accepts_multiple_days_and_labels_admin(self):
+        """Проверяет обработку нескольких дней и подписи администратора."""
         from datetime import datetime
 
         class FixedDateTime(datetime):
+            """Фиксирует дату и время для проверки календарных сценариев."""
             @classmethod
             def now(cls, tz=None):
+                """Возвращает фиксированную дату и время теста."""
                 return cls(2026, 11, 13, 12, 0)
 
         admin_option = {
@@ -368,6 +482,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertIn("\u0418\u0432\u0430\u043d\u043e\u0432 >", prompt)
 
     def test_admin_can_update_dismiss_and_delete_other_admin_in_real_database(self):
+        """Проверяет изменение, увольнение и удаление администратора в тестовой базе."""
         owner = {"user_id": 100, "phone_number": "+79990000001", "first_name": "Owner", "last_name": "Owner", "role": "owner", "status": "active"}
         first_admin = {"user_id": 201, "phone_number": "+79990000003", "first_name": "Petr", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
         second_admin = {"user_id": 202, "phone_number": "+79990000004", "first_name": "Ivan", "last_name": "\u0418\u0432\u0430\u043d\u043e\u0432", "role": "admin", "status": "active"}

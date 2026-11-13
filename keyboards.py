@@ -5,7 +5,9 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton
 BACK_BUTTON = "⬅️ Назад в меню"
 
 
-def get_main_keyboard(is_admin=False, is_owner=False):
+def get_main_keyboard(is_admin=False, is_owner=False, has_admin_access=None):
+    if has_admin_access is not None:
+        is_admin = has_admin_access
     """Главное меню."""
     buttons = [
         [KeyboardButton("Начать смену"), KeyboardButton("Закончить смену")],

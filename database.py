@@ -415,7 +415,8 @@ def get_active_shift(user_id):
     return None
 
 
-def start_shift(user_id):
+def start_shift(user_id, employee_name=None):
+    """Создает новую активную смену с текущим временем начала."""
     shifts = load_json("shifts.json")
     shift = {
         "user_id": user_id,
@@ -423,8 +424,11 @@ def start_shift(user_id):
         "shift_end": None,
         "status": "active"
     }
+    if employee_name:
+        shift["employee_name"] = str(employee_name).strip()
     shifts.append(shift)
     save_json("shifts.json", shifts)
+
 
 
 def end_shift(user_id):
@@ -495,12 +499,13 @@ def _valid_schedule_date(value):
 
 
 def schedule_time_to_minutes(value, allow_24=False):
-    if not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):00|24:00", value):
-        return None
-    if value == "24:00" and not allow_24:
+    """Проверяет время HH:MM и переводит его в минуты от начала суток."""
+    if not isinstance(value, str):
         return None
     if value == "24:00":
-        return 24 * 60
+        return 24 * 60 if allow_24 else None
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+        return None
     hours, minutes = (int(part) for part in value.split(":"))
     return hours * 60 + minutes
 
@@ -828,18 +833,52 @@ def delete_schedule_entry(schedule_id, actor_user_id, actor_role, owner_user_id=
 
 # Функции для отчетов
 def get_user_shifts(user_id, days=30):
+    """Возвращает недавние закрытые смены пользователя и его текущую активную смену."""
     shifts = load_json("shifts.json")
+    now = datetime.now()
+    cutoff = now - timedelta(days=max(0, int(days)))
     user_shifts = []
     for shift in shifts:
-        if shift.get("user_id") == user_id and shift.get("status") == "closed":
+        if shift.get("user_id") != user_id:
+            continue
+        if shift.get("status") not in ("closed", "active"):
+            continue
+        try:
+            started_at = datetime.strptime(shift["shift_start"], "%Y-%m-%d %H:%M:%S")
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cutoff <= started_at <= now:
             user_shifts.append(shift)
-    return user_shifts[-days:]
+    return user_shifts
 
 
 def get_all_shifts(days=30):
+    """Возвращает последние закрытые смены всех пользователей."""
     shifts = load_json("shifts.json")
     recent_shifts = []
     for shift in shifts:
         if shift.get("status") == "closed":
             recent_shifts.append(shift)
     return recent_shifts[-days:]
+
+def delete_schedule_entries(schedule_ids, actor_user_id, actor_role, owner_user_id=None):
+    """Атомарно удаляет выбранные смены после проверки всех ID и прав."""
+    if not _schedule_actor_is_valid(actor_user_id, actor_role, owner_user_id):
+        return False, "forbidden", []
+    if not isinstance(schedule_ids, (list, tuple)) or not schedule_ids:
+        return False, "invalid_selection", []
+    if len(set(schedule_ids)) != len(schedule_ids):
+        return False, "invalid_selection", []
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "invalid_schedule_data", []
+    by_id = {item.get("id"): item for item in schedule}
+    if any(schedule_id not in by_id for schedule_id in schedule_ids):
+        return False, "not_found", []
+    selected = [by_id[schedule_id] for schedule_id in schedule_ids]
+    if actor_role != "owner" and any(_schedule_target_is_owner(item, owner_user_id) for item in selected):
+        return False, "owner_protected", []
+    selected_ids = set(schedule_ids)
+    remaining = [item for item in schedule if item.get("id") not in selected_ids]
+    save_json("schedule.json", remaining)
+    return True, "ok", [dict(item) for item in selected]

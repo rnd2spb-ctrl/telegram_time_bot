@@ -15,7 +15,7 @@ SCHEDULE_MENU, SCHEDULE_SELECT_ENTRY, SCHEDULE_END_TIME, SCHEDULE_DELETE_CONFIRM
 SCHEDULE_DELETE_INVALID_SELECT, SCHEDULE_DELETE_INVALID_CONFIRM = range(15, 17)
 
 def clear_schedule_state(context):
-    for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
+    for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_selected_ids', 'schedule_delete_employee_options', 'schedule_delete_employee', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
         context.user_data.pop(key, None)
 
 MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Новая ссылка', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
@@ -280,7 +280,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f'Добро пожаловать! {NEED_INVITE_TEXT}', reply_markup=ReplyKeyboardRemove())
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show Telegram ID, full name, and current role."""
+    """Показывает Telegram ID, ФИО и роль; затем восстанавливает главное меню."""
     user = update.effective_user
     if not user:
         await update.message.reply_text('\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f Telegram.')
@@ -294,8 +294,10 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role_name = role_names.get(role, '\u043d\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u043d / \u0434\u043e\u0441\u0442\u0443\u043f \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442')
     label = current_user_prompt_label(user, employee, role)
     await update.message.reply_text(
-        f'\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: {label}\n\u0424\u0418\u041e: {full_name}\nTelegram ID: {user.id}\n\u0420\u043e\u043b\u044c: {role_name}'
+        f'\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: {label}\n\u0424\u0418\u041e: {full_name}\nTelegram ID: {user.id}\n\u0420\u043e\u043b\u044c: {role_name}',
+        reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner')
     )
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     '''Обработчик нажатий на кнопки главного меню.'''
@@ -824,10 +826,37 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
     return SCHEDULE_SELECT_ENTRY
 
 async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет выбор смены или набора смен для дальнейшего изменения/удаления."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     value = update.message.text.strip()
     entry_ids = context.user_data.get('schedule_entry_ids', [])
+    action = context.user_data.get('schedule_action')
+    if action == 'delete':
+        selected_numbers = parse_number_selection(value, len(entry_ids))
+        if selected_numbers is None:
+            await update.message.reply_text('Некорректный выбор. Введите номера смен через запятую (например 1,3,5) или диапазон (например 1-5).')
+            return SCHEDULE_SELECT_ENTRY
+        selected_ids = [entry_ids[number - 1] for number in selected_numbers]
+        entries = [get_schedule_entry(schedule_id) for schedule_id in selected_ids]
+        if any(entry is None for entry in entries):
+            clear_schedule_state(context)
+            await update.message.reply_text('Одна или несколько смен уже недоступны. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        role = get_user_role(update.effective_user.id)
+        if role != 'owner' and any(
+            entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}'
+            for entry in entries
+        ):
+            clear_schedule_state(context)
+            await update.message.reply_text('❌ Администратор не может удалять смены владельца.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        context.user_data['schedule_selected_ids'] = selected_ids
+        lines = [f'Будут удалены смены: {len(entries)}.']
+        lines.extend(f'{number}. {_schedule_entry_label(entry)}' for number, entry in enumerate(entries, 1))
+        lines.append('Введите 1 для подтверждения удаления или 2 для отмены.')
+        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        return SCHEDULE_DELETE_CONFIRM
     if not value.isdigit() or not 1 <= int(value) <= len(entry_ids):
         await update.message.reply_text('Введите номер смены из списка.')
         return SCHEDULE_SELECT_ENTRY
@@ -836,23 +865,22 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
     role = get_user_role(update.effective_user.id)
     if not entry:
         clear_schedule_state(context)
-        await update.message.reply_text('Эта запись уже недоступна. Откройте управление расписанием заново.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выбранная смена уже недоступна. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
     is_owner_shift = entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}'
     if role != 'owner' and is_owner_shift:
         await update.message.reply_text('❌ Администратор не может изменять смены владельца.')
         clear_schedule_state(context)
-        await update.message.reply_text('Выберите другое действие:', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выберите действие:', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
     context.user_data['schedule_selected_id'] = schedule_id
-    if context.user_data.get('schedule_action') == 'delete':
-        await update.message.reply_text(f'Удалить эту смену?\n{_schedule_entry_label(entry)}\n\nВведите 1 для подтверждения или 2 для отмены.', reply_markup=get_dialog_keyboard())
-        return SCHEDULE_DELETE_CONFIRM
+    context.user_data['schedule_selected_ids'] = [schedule_id]
     context.user_data['schedule_action'] = 'edit'
-    await update.message.reply_text(f'Изменение смены:\n{_schedule_entry_label(entry)}\n\nВведите новую дату в формате ДД.ММ.ГГГГ:', reply_markup=get_dialog_keyboard())
+    await update.message.reply_text(f'Изменение смены:\n{_schedule_entry_label(entry)}\n\nВведите день/дни текущего месяца ({datetime.now():%m.%Y}), например 5 или 13,15,17 или диапазон 13-15:', reply_markup=get_dialog_keyboard())
     return GET_SCHEDULE_DATE
 
 async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждает удаление выбранных записей и фиксирует операцию в аудите."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     choice = update.message.text.strip()
@@ -863,12 +891,13 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
         clear_schedule_state(context)
         await update.message.reply_text('Удаление отменено.', reply_markup=get_schedule_management_keyboard())
         return SCHEDULE_MENU
-    schedule_id = context.user_data.get('schedule_selected_id')
+    schedule_ids = context.user_data.get('schedule_selected_ids') or [context.user_data.get('schedule_selected_id')]
     role = get_user_role(update.effective_user.id)
-    success, reason, deleted = delete_schedule_entry(schedule_id, actor_user_id=update.effective_user.id, actor_role=role, owner_user_id=config.OWNER_ID)
+    success, reason, deleted = delete_schedule_entries(schedule_ids, actor_user_id=update.effective_user.id, actor_role=role, owner_user_id=config.OWNER_ID)
     if success:
-        audit_action(update, 'schedule_entry_deleted', target_user_id=deleted.get('user_id'), details={'schedule_id': deleted.get('id'), 'employee_id': deleted.get('employee_id'), 'employee_name': deleted.get('employee_name'), 'date': deleted.get('date'), 'start_time': deleted.get('start_time'), 'end_time': deleted.get('end_time')})
-        message = '✅ Смена удалена из расписания.'
+        for item in deleted:
+            audit_action(update, 'schedule_entry_deleted', target_user_id=item.get('user_id'), details={'schedule_id': item.get('id'), 'employee_id': item.get('employee_id'), 'employee_name': item.get('employee_name'), 'date': item.get('date'), 'start_time': item.get('start_time'), 'end_time': item.get('end_time')})
+        message = f'✅ Удалено смен: {len(deleted)}.'
     elif reason == 'owner_protected':
         message = '❌ Администратор не может удалять смены владельца.'
     elif reason == 'invalid_schedule_data':
@@ -880,31 +909,38 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
     return SCHEDULE_MENU
 
 async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет введенные дни месяца и определяет следующий шаг диалога."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     date_text = update.message.text.strip()
     action = context.user_data.get('schedule_action')
-    if action == 'add':
-        dates = parse_schedule_days(date_text, datetime.now().date())
-        if dates is None:
-            month = datetime.now()
-            days_in_month = calendar.monthrange(month.year, month.month)[1]
-            await update.message.reply_text(
-                f'\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0434\u043d\u0435\u0439. \u0414\u043b\u044f \u043c\u0435\u0441\u044f\u0446\u0430 {month:%m.%Y} \u0443\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u0430 \u043e\u0442 1 \u0434\u043e {days_in_month}: 13,15,17 \u0438\u043b\u0438 13-15.'
-            )
-            return GET_SCHEDULE_DATE
-        context.user_data['schedule_dates'] = dates
-        context.user_data['schedule_date'] = dates[0]
-    else:
-        try:
-            parsed_date = datetime.strptime(date_text, '%d.%m.%Y').date()
-            if parsed_date.strftime('%d.%m.%Y') != date_text:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text('\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u0430\u044f \u0434\u0430\u0442\u0430. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0444\u043e\u0440\u043c\u0430\u0442 \u0414\u0414.\u041c\u041c.\u0413\u0413\u0413\u0413, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 13.11.2026.')
-            return GET_SCHEDULE_DATE
-        context.user_data['schedule_date'] = parsed_date.isoformat()
-        context.user_data['schedule_dates'] = [parsed_date.isoformat()]
+    dates = parse_schedule_days(date_text, datetime.now().date())
+    if dates is None:
+        month = datetime.now()
+        days_in_month = calendar.monthrange(month.year, month.month)[1]
+        await update.message.reply_text(
+            f'Некорректный список дней. Для месяца {month:%m.%Y} укажите числа от 1 до {days_in_month}: 13,15,17 или 13-15.'
+        )
+        return GET_SCHEDULE_DATE
+    context.user_data['schedule_dates'] = dates
+    context.user_data['schedule_date'] = dates[0]
+    if action == 'delete':
+        selected_employee = context.user_data.get('schedule_delete_employee') or {}
+        employee_id = selected_employee.get('employee_id')
+        matching = [entry for entry in _manageable_schedule_entries(get_user_role(update.effective_user.id))
+                    if entry.get('employee_id') == employee_id and entry.get('date') in dates]
+        if not matching:
+            clear_schedule_state(context)
+            await update.message.reply_text('У выбранного сотрудника нет смен на указанные дни.', reply_markup=get_schedule_management_keyboard())
+            return SCHEDULE_MENU
+        matching.sort(key=lambda item: (item.get('date', ''), item.get('start_time', '')))
+        context.user_data['schedule_selected_ids'] = [item['id'] for item in matching]
+        lines = [f'Будут удалены смены сотрудника {selected_employee.get("employee_name", "")}: {len(matching)}.']
+        lines.extend(f'• {_schedule_entry_label(item)}' for item in matching)
+        lines.append('Введите 1 для подтверждения или 2 для отмены.')
+        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        return SCHEDULE_DELETE_CONFIRM
+
     role = get_user_role(update.effective_user.id)
     options = _schedule_employee_options(role)
     if not options:
@@ -943,23 +979,25 @@ async def schedule_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return GET_SCHEDULE_TIME
 
 async def schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет и сохраняет время начала смены."""
     if not await require_admin(update, context):
         return ConversationHandler.END
-    start_time = update.message.text.strip()
-    if schedule_time_to_minutes(start_time, allow_24=False) is None:
-        await update.message.reply_text('Некорректное время начала. Допускаются только целые часы от 00:00 до 23:00.')
+    start_time = normalize_schedule_time(update.message.text, allow_24=False)
+    if start_time is None:
+        await update.message.reply_text('Некорректное время начала. Введите часы (например, 9) или время HH:MM (например, 09:30).')
         return GET_SCHEDULE_TIME
     context.user_data['schedule_start_time'] = start_time
-    await update.message.reply_text('Введите время окончания смены (например, 18:00 или 24:00):', reply_markup=get_dialog_keyboard())
+    await update.message.reply_text('Введите время окончания: часы (15) или полный формат (15:30 / 24:00).', reply_markup=get_dialog_keyboard())
     return SCHEDULE_END_TIME
 
 async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет время окончания и сохраняет или обновляет смену."""
     if not await require_admin(update, context):
         return ConversationHandler.END
     start_time = context.user_data.get('schedule_start_time')
-    end_time = update.message.text.strip()
-    if schedule_time_to_minutes(end_time, allow_24=True) is None:
-        await update.message.reply_text('\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0446\u0435\u043b\u044b\u0439 \u0447\u0430\u0441 \u043e\u0442 01:00 \u0434\u043e 24:00.')
+    end_time = normalize_schedule_time(update.message.text, allow_24=True)
+    if end_time is None:
+        await update.message.reply_text('Некорректное время окончания. Введите часы (например, 15) или время HH:MM (например, 15:30).')
         return SCHEDULE_END_TIME
     selected = context.user_data.get('schedule_employee')
     dates = context.user_data.get('schedule_dates') or ([context.user_data.get('schedule_date')] if context.user_data.get('schedule_date') else [])
@@ -1006,24 +1044,46 @@ async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         message = '\n'.join(lines)
     elif action == 'edit':
-        date_value = dates[0]
-        success, reason, old_entry, new_entry = update_schedule_entry(
-            context.user_data.get('schedule_selected_id'), date_value, selected,
-            start_time, end_time, actor_user_id=update.effective_user.id,
-            actor_role=role, owner_user_id=config.OWNER_ID
+        schedule_id = context.user_data.get('schedule_selected_id')
+        success, reason, old_entry, first_new_entry = update_schedule_entry(
+            schedule_id, dates[0], selected, start_time, end_time,
+            actor_user_id=update.effective_user.id, actor_role=role,
+            owner_user_id=config.OWNER_ID
         )
         if success:
-            audit_action(update, 'schedule_entry_updated', target_user_id=new_entry.get('user_id'), details={
-                'schedule_id': new_entry.get('id'), 'employee_id': new_entry.get('employee_id'),
-                'employee_name': new_entry.get('employee_name'), 'old_date': old_entry.get('date'),
-                'new_date': new_entry.get('date'), 'old_start_time': old_entry.get('start_time'),
-                'new_start_time': new_entry.get('start_time'), 'old_end_time': old_entry.get('end_time'),
-                'new_end_time': new_entry.get('end_time')
+            audit_action(update, 'schedule_entry_updated', target_user_id=first_new_entry.get('user_id'), details={
+                'schedule_id': first_new_entry.get('id'), 'employee_id': first_new_entry.get('employee_id'),
+                'employee_name': first_new_entry.get('employee_name'), 'old_date': old_entry.get('date'),
+                'new_dates': dates, 'old_start_time': old_entry.get('start_time'),
+                'new_start_time': first_new_entry.get('start_time'), 'old_end_time': old_entry.get('end_time'),
+                'new_end_time': first_new_entry.get('end_time')
             })
-            message = '\u2705 \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b.'
+            created = [first_new_entry]
+            failures = []
+            for date_value in dates[1:]:
+                added_ok, add_reason, added_entry = add_to_schedule(
+                    date_value, selected, start_time, end_time,
+                    actor_user_id=update.effective_user.id, actor_role=role,
+                    owner_user_id=config.OWNER_ID
+                )
+                if added_ok:
+                    created.append(added_entry)
+                    audit_action(update, 'schedule_entry_added', target_user_id=added_entry.get('user_id'), details={
+                        'schedule_id': added_entry.get('id'), 'employee_id': added_entry.get('employee_id'),
+                        'employee_name': added_entry.get('employee_name'), 'date': added_entry.get('date'),
+                        'start_time': added_entry.get('start_time'), 'end_time': added_entry.get('end_time'),
+                        'source_schedule_id': schedule_id
+                    })
+                else:
+                    failures.append((date_value, add_reason))
+            message_lines = [f'✅ Создано/изменено смен: {len(created)} из {len(dates)}.']
+            if failures:
+                message_lines.append('Не удалось добавить смены:')
+                message_lines.extend(f'• {datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")}: {reason}' for day, reason in failures)
+            message = '\n'.join(message_lines)
         else:
-            messages = {'owner_protected': '\u274c \u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440 \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u0432\u0430\u0442\u044c \u0438\u043b\u0438 \u0438\u0437\u043c\u0435\u043d\u044f\u0442\u044c \u0441\u043c\u0435\u043d\u044b \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0430.', 'overlap': '\u274c \u0423 \u044d\u0442\u043e\u0433\u043e \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c \u0441\u043c\u0435\u043d\u0430, \u043f\u0435\u0440\u0435\u0441\u0435\u043a\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u0435\u043c.', 'invalid_date': '\u274c \u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u0430\u044f \u0434\u0430\u0442\u0430.', 'invalid_time': '\u274c \u0412\u0440\u0435\u043c\u044f \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0443\u043a\u0430\u0437\u0430\u043d\u043e \u0446\u0435\u043b\u044b\u043c\u0438 \u0447\u0430\u0441\u0430\u043c\u0438, \u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435 \u2014 \u043f\u043e\u0437\u0436\u0435 \u043d\u0430\u0447\u0430\u043b\u0430.', 'employee_not_available': '\u274c \u042d\u0442\u043e\u0442 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u0438\u043b\u0438 \u0435\u0433\u043e \u0434\u0430\u043d\u043d\u044b\u0435 \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c.', 'invalid_schedule_data': '\u274c \u0424\u0430\u0439\u043b \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u043f\u043e\u0432\u0440\u0435\u0436\u0434\u0451\u043d \u0438\u043b\u0438 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u0441\u0442\u0430\u0440\u044b\u0439 \u0444\u043e\u0440\u043c\u0430\u0442. \u0414\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0438\u0441\u0430\u043d\u044b.', 'not_found': '\u274c \u0417\u0430\u043f\u0438\u0441\u044c \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.', 'forbidden': '\u274c \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432 \u0434\u043b\u044f \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f.'}
-            message = messages.get(reason, '\u274c \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443.')
+            messages = {'owner_protected': '❌ Администратор не может создавать или изменять смены владельца.', 'overlap': '❌ У этого сотрудника уже есть смена, пересекающаяся с указанным временем.', 'invalid_date': '❌ Некорректная дата.', 'invalid_time': '❌ Время окончания должно быть позже времени начала.', 'employee_not_available': '❌ Этот сотрудник больше не активен или его данные изменились.', 'invalid_schedule_data': '❌ Файл расписания повреждён или содержит старый формат. Данные не перезаписаны.', 'not_found': '❌ Запись расписания больше не найдена.', 'forbidden': '❌ Недостаточно прав для изменения расписания.'}
+            message = messages.get(reason, '❌ Не удалось сохранить смену.')
     else:
         message = '\u274c \u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0441 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.'
     clear_schedule_state(context)
@@ -1090,16 +1150,28 @@ async def schedule_invalid_confirm(update: Update, context: ContextTypes.DEFAULT
     return SCHEDULE_MENU
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    '''Отмена административного диалога.'''
-
+    """Отменяет текущий диалог, очищает его данные и возвращает в родительское меню."""
     role = get_user_role(update.effective_user.id)
     context.user_data.pop('new_employee_phone', None)
     clear_schedule_state(context)
+    context.user_data.pop('editable_employee_phones', None)
     context.user_data.pop('editable_employee_ids', None)
+    context.user_data.pop('editing_employee_phone', None)
     context.user_data.pop('editing_employee_id', None)
     clear_manage_employee_state(context)
-    await update.message.reply_text('Текущая операция отменена. Выберите нужный пункт меню ещё раз.', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
+    parent = context.user_data.get('menu_parent')
+    if parent == 'employees' and is_admin_role(role):
+        markup = get_employee_management_keyboard(role == 'owner')
+        message = 'Управление сотрудниками. Выберите действие:'
+    elif parent == 'schedule' and is_admin_role(role):
+        markup = get_schedule_management_keyboard()
+        message = 'Управление расписанием. Выберите действие:'
+    else:
+        markup = get_main_keyboard(is_admin_role(role), role == 'owner')
+        message = 'Главное меню:'
+    await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
+
 
 def main():
     '''Запуск бота.'''
@@ -1125,3 +1197,20 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+def normalize_schedule_time(value, allow_24=False):
+    """Проверяет часы и формат HH:MM/HH-MM; возвращает нормализованное HH:MM."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"\d{1,2}", value):
+        hour = int(value)
+        if 0 <= hour <= (24 if allow_24 else 23):
+            return "24:00" if hour == 24 else f"{hour:02d}:00"
+        return None
+    if re.fullmatch(r"\d{1,2}[:-]\d{2}", value):
+        hour, minute = map(int, re.split(r"[:-]", value))
+        if minute > 59 or hour > 24 or (hour == 24 and (minute != 0 or not allow_24)):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    return None
