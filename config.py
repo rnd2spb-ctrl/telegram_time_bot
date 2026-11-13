@@ -38,18 +38,5 @@ def _parse_telegram_id(value, variable_name):
     return telegram_id
 
 
-def _parse_admin_ids(value):
-    admin_ids = set()
-    for item in (value or "").replace(";", ",").split(","):
-        item = item.strip()
-        if item:
-            admin_ids.add(_parse_telegram_id(item, "ADMIN_IDS"))
-    return admin_ids
-
-
-# Первоначальный владелец назначается явно через OWNER_ID.
-# Первый пользователь, открывший бота, владельцем не становится.
+# The owner is assigned explicitly; the first person to message the bot is not made owner.
 OWNER_ID = _parse_telegram_id(os.getenv("OWNER_ID"), "OWNER_ID")
-
-# Дополнительные администраторы, назначенные владельцем через конфигурацию.
-ADMIN_IDS = _parse_admin_ids(os.getenv("ADMIN_IDS"))
