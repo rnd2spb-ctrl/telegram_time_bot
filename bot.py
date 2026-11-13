@@ -22,7 +22,7 @@ def clear_schedule_state(context):
     for key in ('schedule_action', 'schedule_date', 'schedule_dates', 'schedule_employee', 'schedule_employee_options', 'schedule_start_time', 'schedule_entry_ids', 'schedule_selected_id', 'schedule_selected_ids', 'schedule_delete_employee_options', 'schedule_delete_employee', 'schedule_invalid_indices', 'schedule_invalid_records', 'schedule_invalid_selected_indices', 'schedule_invalid_selected_records'):
         context.user_data.pop(key, None)
 
-MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
+MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Новая ссылка', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
 MENU_BUTTON_PATTERN = '^(?:' + '|'.join((re.escape(label) for label in MENU_BUTTONS)) + ')$'
 
 
@@ -137,12 +137,139 @@ def audit_action(update, action, target_user_id=None, details=None):
         return False
     return log_action(actor_user_id=user.id, actor_role=get_user_role(user.id), action=action, target_user_id=target_user_id, details=details)
 
+LINK_METHOD_INVITE = 'invite'
+NEED_INVITE_TEXT = 'Для доступа нужна ссылка-приглашение от администратора. Попросите выдать её и откройте ссылку.'
+INVALID_INVITE_TEXT = 'Ссылка недействительна или устарела. Попросите администратора выдать новую.'
+NEED_EMPLOYEE_RECORD_TEXT = 'Для учёта рабочего времени нужна запись сотрудника, привязанная к вашему Telegram. Добавьте её через «Редактировать» → «Добавить сотрудника» и войдите по выданной ссылке.'
+
+def full_name_of(employee):
+    """ФИО записи сотрудника в формате «Фамилия Имя»."""
+    return ' '.join((part for part in (employee.get('last_name'), employee.get('first_name')) if part)) or 'Имя не указано'
+
+def format_invite_link(bot_username, token):
+    """Ссылка для входа; без username бота возвращает команду для ручного ввода."""
+    if bot_username:
+        return f'https://t.me/{bot_username}?start={token}'
+    return f'/start {token}'
+
+def invite_link_for(context, token):
+    """Ссылка для входа по username бота из контекста."""
+    return format_invite_link(getattr(getattr(context, 'bot', None), 'username', None), token)
+
+def build_invite_message(full_name, link):
+    """Сообщение админу со ссылкой для входа сотрудника."""
+    return f'🔗 Ссылка для входа сотрудника {full_name} (действует {INVITE_TTL_HOURS} ч, сработает один раз):\n{link}\n\nПередайте её сотруднику лично или в закрытом чате: войдёт тот, кто откроет ссылку первым. Когда сотрудник войдёт, вы получите уведомление.'
+
+def describe_link_state(employee):
+    """Короткая пометка о входе сотрудника для списков; пустая, если вход не нужен."""
+    if employee.get('status', 'active') != 'active':
+        return ''
+    state, expires = get_invite_state(employee)
+    if state == 'pending':
+        return f"⏳ ожидает входа (ссылка до {expires.strftime('%d.%m %H:%M')})"
+    if state == 'expired':
+        return '⚠️ ссылка истекла — выдайте новую'
+    if state == 'none':
+        return '⚠️ нет ссылки — выдайте новую'
+    return ''
+
+def get_link_notification_recipients(exclude_user_id=None, extra_user_ids=()):
+    """Telegram ID владельца и активных администраторов, которых нужно уведомить.
+
+    extra_user_ids — например, выдавший ссылку: он получает уведомление, пока
+    остаётся владельцем или активным администратором.
+    """
+    recipients = []
+    if config.OWNER_ID is not None:
+        recipients.append(config.OWNER_ID)
+    admin_ids = set()
+    for item in get_all_employees():
+        user_id = item.get('user_id')
+        if user_id is not None and item.get('role') == 'admin' and (item.get('status', 'active') == 'active'):
+            admin_ids.add(user_id)
+            recipients.append(user_id)
+    for user_id in extra_user_ids:
+        if user_id is not None and (user_id == config.OWNER_ID or user_id in admin_ids):
+            recipients.append(user_id)
+    unique = []
+    for user_id in recipients:
+        if user_id != exclude_user_id and user_id not in unique:
+            unique.append(user_id)
+    return unique
+
+def build_link_notification(user, employee):
+    """Текст уведомления о том, кто вошёл по приглашению."""
+    username = f'@{user.username}' if getattr(user, 'username', None) else 'нет username'
+    telegram_name = ' '.join((part for part in (getattr(user, 'first_name', None), getattr(user, 'last_name', None)) if part)) or '—'
+    issuer = '—'
+    issuer_id = employee.get('invited_by')
+    if issuer_id is not None:
+        issuer_record = get_employee_by_user_id(issuer_id)
+        issuer = f'{full_name_of(issuer_record)} (ID {issuer_id})' if issuer_record else f'ID {issuer_id}'
+    invited_at = employee.get('invited_at')
+    if invited_at:
+        try:
+            issuer += f", {datetime.fromisoformat(invited_at).strftime('%d.%m.%Y %H:%M')}"
+        except ValueError:
+            pass
+    return '\n'.join([
+        '🔔 Сотрудник вошёл в бота по ссылке-приглашению',
+        f'Запись: {full_name_of(employee)}',
+        f"Телефон: {employee.get('phone_number') or '—'}",
+        f'Аккаунт Telegram: {telegram_name}, {username}, ID {user.id}',
+        f'Ссылку выдал: {issuer}',
+        f"Время входа: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        'Если это не тот человек, откройте «Редактировать» → «Уволить сотрудника», а затем выдайте настоящему сотруднику новую запись и ссылку.'
+    ])
+
+async def notify_admins_about_link(context, user, employee):
+    """Отправляет владельцу и админам сообщение о новой привязке аккаунта.
+
+    Ошибка доставки одному получателю (например, он не запускал бота) не влияет
+    на вход сотрудника и на остальных получателей. Возвращает (доставлено, не доставлено).
+    """
+    text = build_link_notification(user, employee)
+    recipients = get_link_notification_recipients(exclude_user_id=user.id, extra_user_ids=(employee.get('invited_by'),))
+    delivered, failed = [], []
+    for chat_id in recipients:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            delivered.append(chat_id)
+        except Exception:
+            failed.append(chat_id)
+            logger.warning('Не удалось отправить уведомление о привязке пользователю %s', chat_id, exc_info=True)
+    return delivered, failed
+
+async def complete_invite_login(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str):
+    """Привязывает аккаунт к записи сотрудника по коду из ссылки-приглашения."""
+    user = update.effective_user
+    ok, reason, employee = redeem_invite(token, user.id)
+    if not ok:
+        text = 'Ваш Telegram уже привязан к другой записи. Обратитесь к владельцу.' if reason == 'user_already_bound' else INVALID_INVITE_TEXT
+        await update.message.reply_text(text, reply_markup=ReplyKeyboardRemove())
+        return
+    role = get_user_role(user.id)
+    delivered, failed = await notify_admins_about_link(context, user, employee)
+    audit_action(update, 'employee_linked', target_user_id=user.id, details={'employee_name': full_name_of(employee), 'phone_number': employee.get('phone_number'), 'method': LINK_METHOD_INVITE, 'invited_by': employee.get('invited_by'), 'notified': delivered, 'notification_failed': failed})
+    await update.message.reply_text(f'Добро пожаловать, {current_user_prompt_label(user, employee, role)}!', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
+
+async def contact_not_supported(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Контакт больше не даёт вход: отвечаем, а не молчим."""
+    if get_user_role(update.effective_user.id) is None:
+        await update.message.reply_text(f'Контакт больше не используется для входа. {NEED_INVITE_TEXT}', reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text('Контакт больше не используется. Вход в бота выполняется только по ссылке-приглашению.')
+
 # --- Команды и основное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает /start и показывает меню согласно роли пользователя."""
+    """Обрабатывает /start и показывает меню; /start КОД выполняет вход по ссылке-приглашению."""
     user = update.effective_user
     employee = get_employee_by_user_id(user.id)
     role = get_user_role(user.id)
+    args = getattr(context, 'args', None)
+    if args and employee is None:
+        await complete_invite_login(update, context, args[0])
+        return
     if is_admin_role(role):
         label = current_user_prompt_label(user, employee, role)
         await update.message.reply_text(
@@ -162,32 +289,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
         return
-    context.user_data['awaiting_phone'] = True
-    await update.message.reply_text(
-        '\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c! \u041f\u043e\u0434\u0435\u043b\u0438\u0442\u0435\u0441\u044c \u0441\u0432\u043e\u0438\u043c \u043a\u043e\u043d\u0442\u0430\u043a\u0442\u043e\u043c \u0438\u043b\u0438 \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u043e\u043c\u0435\u0440 \u0432 \u0444\u043e\u0440\u043c\u0430\u0442\u0435 +7XXXXXXXXXX.',
-        reply_markup=get_phone_keyboard()
-    )
-
-async def complete_phone_identification(update: Update, phone_number: str):
-    """Проверяет номер телефона и безопасно привязывает сотрудника к Telegram ID."""
-
-    user = update.effective_user
-    employee = get_employee_by_phone(phone_number)
-    if not employee:
-        await update.message.reply_text('Номер не найден. Проверьте его или обратитесь к владельцу.', reply_markup=get_phone_keyboard())
-        return
-    if employee.get('status', 'active') != 'active' and user.id != config.OWNER_ID:
-        await update.message.reply_text('Доступ приостановлен. Обратитесь к владельцу.', reply_markup=ReplyKeyboardRemove())
-        return
-    bound, reason, employee = bind_employee_to_user(phone_number, user.id)
-    if not bound:
-        messages = {'phone_already_bound': 'Этот номер уже привязан к другому аккаунту. Обратитесь к владельцу.', 'user_already_bound': 'Ваш Telegram уже привязан к другой записи. Обратитесь к владельцу.', 'not_found': 'Номер не найден. Проверьте его или обратитесь к владельцу.'}
-        await update.message.reply_text(messages.get(reason, 'Не удалось привязать номер. Обратитесь к владельцу.'), reply_markup=ReplyKeyboardRemove())
-        return
-    context.user_data.pop('awaiting_phone', None)
-    role = get_user_role(user.id)
-    audit_action(update, 'employee_linked', target_user_id=user.id, details={'employee_name': ' '.join((part for part in (employee.get('last_name'), employee.get('first_name')) if part)), 'phone_number': employee.get('phone_number')})
-    await update.message.reply_text(f'\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c, {current_user_prompt_label(user, employee, role)}!', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
+    await update.message.reply_text(f'Добро пожаловать! {NEED_INVITE_TEXT}', reply_markup=ReplyKeyboardRemove())
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает Telegram ID, ФИО и роль; затем восстанавливает главное меню."""
@@ -208,15 +310,6 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner')
     )
 
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает контакт Telegram и разрешает привязку только собственного контакта."""
-
-    user = update.effective_user
-    contact = update.message.contact
-    if not contact or contact.user_id != user.id:
-        await update.message.reply_text('Отправьте свой контакт кнопкой «Поделиться контактом».', reply_markup=get_phone_keyboard())
-        return
-    await complete_phone_identification(update, contact.phone_number)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает основные кнопки: смены, время, расписание, сотрудников и отчеты."""
@@ -226,15 +319,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     employee = get_employee_by_user_id(user.id)
     role = get_user_role(user.id)
     if role is None:
-        phone = text.strip()
-        if context.user_data.get('awaiting_phone') and re.fullmatch(r'\+?\d{7,15}', phone):
-            await complete_phone_identification(update, phone)
+        if employee:
+            await update.message.reply_text('❌ Ваш доступ приостановлен. Обратитесь к владельцу бота.', reply_markup=ReplyKeyboardRemove())
         else:
-            await start(update, context)
+            await update.message.reply_text(NEED_INVITE_TEXT, reply_markup=ReplyKeyboardRemove())
         return
     if text == 'Начать смену':
         if not employee and role != 'owner':
-            await update.message.reply_text('Для учета рабочего времени сначала привяжите свой номер телефона через /start.')
+            await update.message.reply_text(NEED_EMPLOYEE_RECORD_TEXT)
             return
         active_shift = get_active_shift(user.id)
         if active_shift:
@@ -248,7 +340,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == 'Закончить смену':
         if not employee and role != 'owner':
-            await update.message.reply_text('Для учета рабочего времени сначала привяжите свой номер телефона через /start.')
+            await update.message.reply_text(NEED_EMPLOYEE_RECORD_TEXT)
             return
         active_shift = get_active_shift(user.id)
         if not active_shift:
@@ -272,7 +364,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == 'Мое время':
         if not employee and role != 'owner':
-            await update.message.reply_text('Для просмотра личного времени сначала привяжите свой номер телефона через /start.')
+            await update.message.reply_text(NEED_EMPLOYEE_RECORD_TEXT)
             return
         shifts = get_user_shifts(user.id, 7)
         total_time = calculate_work_time(shifts)
@@ -307,7 +399,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not (isinstance(phone, str) and re.fullmatch('\\+?\\d{7,15}', phone)):
                     lines.append(f'⚠️ Некорректная запись: {full_name} — {phone}')
                     continue
-                lines.append(f'\u2022 {employee_prompt_label(item)} \u2014 {phone} \u2014 {status}')
+                line = f'\u2022 {employee_prompt_label(item)} \u2014 {phone} \u2014 {status}'
+                link_state = describe_link_state(item)
+                if link_state:
+                    line += f' \u2014 {link_state}'
+                lines.append(line)
             message = '\n'.join(lines)
         await update.message.reply_text(message, reply_markup=get_main_keyboard(True, role == 'owner'))
         return
@@ -342,14 +438,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f'⚠️ Некорректная запись: {name} — {phone}')
                 continue
             status_marker = '☠️ ' if item.get('status') == 'dismissed' else ''
-            lines.append(f'{status_marker}{employee_prompt_label(item)} — {phone} — {item.get('status', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')}')
+            line = f'{status_marker}{employee_prompt_label(item)} — {phone} — {item.get('status', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')}'
+            link_state = describe_link_state(item)
+            if link_state:
+                line += f' — {link_state}'
+            lines.append(line)
         await update.message.reply_text('\n'.join(lines), reply_markup=get_employee_management_keyboard(role == 'owner'))
         return
-    if text in {'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи'}:
+    if text in {'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Новая ссылка', 'Удалить ошибочные записи'}:
         context.user_data['menu_parent'] = 'employees'
         if not await require_admin(update, context):
             return
-        action = {'Изменить данные': 'edit', 'Уволить сотрудника': 'dismiss', 'Удалить сотрудника': 'delete', 'Удалить ошибочные записи': 'delete_invalid'}[text]
+        action = {'Изменить данные': 'edit', 'Уволить сотрудника': 'dismiss', 'Удалить сотрудника': 'delete', 'Новая ссылка': 'invite', 'Удалить ошибочные записи': 'delete_invalid'}[text]
         context.user_data['manage_employee_action'] = action
         if action == 'delete_invalid':
             records = get_invalid_employee_records()
@@ -368,12 +468,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 if item.get('user_id') == config.OWNER_ID:
                     continue
-                if action in {'edit', 'dismiss'}:
+                if action in {'edit', 'dismiss', 'invite'}:
                     if item.get('status', 'active') != 'active':
                         continue
+                if action == 'invite' and item.get('user_id') is not None:
+                    continue
+                if action == 'invite' and item.get('role') == 'admin' and role != 'owner':
+                    continue
                 employees.append(item)
             if not employees:
-                await update.message.reply_text('Нет сотрудников, доступных для этой операции.', reply_markup=get_employee_management_keyboard(role == 'owner'))
+                empty_text = 'Все активные сотрудники уже вошли в бота: новая ссылка не нужна.' if action == 'invite' else 'Нет сотрудников, доступных для этой операции.'
+                await update.message.reply_text(empty_text, reply_markup=get_employee_management_keyboard(role == 'owner'))
                 return ConversationHandler.END
             context.user_data['manage_employee_phones'] = [x['phone_number'] for x in employees]
             lines = ['Выберите сотрудника, введя номер из списка:']
@@ -492,6 +597,21 @@ async def manage_employee_select(update: Update, context: ContextTypes.DEFAULT_T
     if not employee or employee.get('user_id') == config.OWNER_ID:
         clear_manage_employee_state(context)
         await update.message.reply_text('Сотрудник больше не доступен для изменения.')
+        return ConversationHandler.END
+    if action == 'invite':
+        is_owner = get_user_role(update.effective_user.id) == 'owner'
+        keyboard = get_employee_management_keyboard(is_owner)
+        if employee.get('role') == 'admin' and not is_owner:
+            clear_manage_employee_state(context)
+            await update.message.reply_text('❌ Только владелец может выдавать ссылки администраторам.', reply_markup=keyboard)
+            return ConversationHandler.END
+        token = create_invite(phone, issued_by=update.effective_user.id)
+        clear_manage_employee_state(context)
+        if token is None:
+            await update.message.reply_text('❌ Ссылку выдать нельзя: сотрудник уже вошёл в бота или его доступ приостановлен.', reply_markup=keyboard)
+            return ConversationHandler.END
+        audit_action(update, 'invite_reissued', details={'employee_name': full_name_of(employee), 'phone_number': phone})
+        await update.message.reply_text(build_invite_message(full_name_of(employee), invite_link_for(context, token)), reply_markup=keyboard)
         return ConversationHandler.END
     context.user_data['manage_employee_phone'] = phone
     if action == 'edit':
@@ -623,7 +743,13 @@ async def add_employee_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = name_parts[1] if len(name_parts) > 1 else name_parts[0]
     if add_employee(None, phone, first_name, last_name):
         audit_action(update, 'employee_added', details={'employee_name': full_name, 'phone_number': phone})
-        await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+        keyboard = get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner')
+        token = create_invite(phone, issued_by=update.effective_user.id)
+        if token:
+            audit_action(update, 'invite_created', details={'employee_name': full_name, 'phone_number': phone})
+            await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!\n\n' + build_invite_message(full_name, invite_link_for(context, token)), reply_markup=keyboard)
+        else:
+            await update.message.reply_text(f'✅ Сотрудник {full_name} добавлен, но ссылку выдать не удалось. Откройте «Редактировать» → «Новая ссылка».', reply_markup=keyboard)
     else:
         await update.message.reply_text('❌ Сотрудник с таким номером телефона уже существует.', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
     context.user_data.pop('new_employee_phone', None)
@@ -1134,7 +1260,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('new_employee_phone', None)
     clear_schedule_state(context)
     context.user_data.pop('editable_employee_phones', None)
+    context.user_data.pop('editable_employee_ids', None)
     context.user_data.pop('editing_employee_phone', None)
+    context.user_data.pop('editing_employee_id', None)
     clear_manage_employee_state(context)
     parent = context.user_data.get('menu_parent')
     if parent == 'employees' and is_admin_role(role):
@@ -1149,6 +1277,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
 
+
 def main():
     """Создает приложение Telegram, регистрирует обработчики и запускает polling."""
 
@@ -1159,15 +1288,15 @@ def main():
     application = Application.builder().token(config.BOT_TOKEN).build()
     add_employee_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Добавить сотрудника$'), button_handler)], states={ADD_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), add_employee_phone)], GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), add_employee_name)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     employee_edit_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Редактировать сотрудника|Назначить/снять администратора)$'), button_handler)], states={EDIT_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), select_employee_for_edit)], EDIT_EMPLOYEE_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), set_selected_employee_role)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
-    employee_management_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Изменить данные|Уволить сотрудника|Удалить сотрудника|Удалить ошибочные записи)$'), button_handler)], states={MANAGE_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_select)], MANAGE_EMPLOYEE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_name)], MANAGE_EMPLOYEE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_phone)], MANAGE_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
+    employee_management_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Изменить данные|Уволить сотрудника|Удалить сотрудника|Новая ссылка|Удалить ошибочные записи)$'), button_handler)], states={MANAGE_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_select)], MANAGE_EMPLOYEE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_name)], MANAGE_EMPLOYEE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_phone)], MANAGE_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     schedule_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Управление графиком$'), button_handler)], states={SCHEDULE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_menu_action)], SCHEDULE_SELECT_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_select_entry)], GET_SCHEDULE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_date)], GET_SCHEDULE_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_employee)], GET_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_time)], SCHEDULE_END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_end_time)], SCHEDULE_DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_delete_confirm)], SCHEDULE_DELETE_INVALID_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_select)], SCHEDULE_DELETE_INVALID_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('whoami', whoami))
-    application.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     application.add_handler(add_employee_conv)
     application.add_handler(employee_edit_conv)
     application.add_handler(employee_management_conv)
     application.add_handler(schedule_conv)
+    application.add_handler(MessageHandler(filters.CONTACT, contact_not_supported))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
     print('Бот запущен...')
     application.run_polling()

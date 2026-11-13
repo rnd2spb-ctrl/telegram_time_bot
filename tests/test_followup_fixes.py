@@ -16,22 +16,17 @@ from test_admin_schedule_features import FakeContext, FakeUpdate
 
 class FollowupFixTests(unittest.TestCase):
     """Регрессионные проверки исправлений авторизации, смен, времени и отчетов."""
-    def test_first_unrecognized_message_starts_onboarding_and_next_phone_is_processed(self):
-        """Проверяет запуск идентификации и обработку следующего сообщения с телефоном."""
+    def test_unrecognized_user_needs_invite_and_phone_text_gives_no_access(self):
+        """Проверяет, что неопознанный пользователь получает просьбу о ссылке, а номер текстом доступа не даёт."""
         context = FakeContext()
-        first = FakeUpdate("Привет", 999)
-        with patch.object(bot, "get_employee_by_user_id", return_value=None), \
-             patch.object(bot, "get_user_role", return_value=None):
-            asyncio.run(bot.button_handler(first, context))
-        self.assertTrue(context.user_data["awaiting_phone"])
-        self.assertIn("Поделитесь", first.message.replies[-1][0])
-
-        second = FakeUpdate("+79990000099", 999)
-        with patch.object(bot, "get_employee_by_user_id", return_value=None), \
-             patch.object(bot, "get_user_role", return_value=None), \
-             patch.object(bot, "complete_phone_identification", new=AsyncMock()) as bind:
-            asyncio.run(bot.button_handler(second, context))
-        bind.assert_awaited_once_with(second, "+79990000099")
+        for text in ("Привет", "+79990000099"):
+            update = FakeUpdate(text, 999)
+            with patch.object(bot, "get_employee_by_user_id", return_value=None), \
+                 patch.object(bot, "get_user_role", return_value=None), \
+                 patch.object(bot, "redeem_invite") as redeem:
+                asyncio.run(bot.button_handler(update, context))
+            self.assertIn("ссылка-приглашение", update.message.replies[-1][0])
+            redeem.assert_not_called()
 
     def test_role_change_list_includes_unbound_and_linked_records(self):
         """Проверяет список сотрудников с привязанным и непривязанным Telegram."""

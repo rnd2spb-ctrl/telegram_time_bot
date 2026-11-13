@@ -1,13 +1,20 @@
 """Работа с JSON-хранилищем: сотрудники, учет смен, расписание и журнал аудита."""
 
 # database.py
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import uuid
 from datetime import datetime, timedelta
 
 DATA_DIR = "data"
+
+# Срок действия ссылки-приглашения и допустимый вид кода из ссылки /start КОД.
+INVITE_TTL_HOURS = 72
+_INVITE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 
 # --- Общие функции JSON-хранилища ---
@@ -101,32 +108,115 @@ def set_employee_role_by_phone(phone_number, role, protected_user_id=None):
     return True, "ok"
 
 
-def bind_employee_to_user(phone_number, user_id):
-    """Привязывает сотрудника к Telegram ID после проверки номера и уникальности привязки."""
-    employees = load_json("employees.json")
+# Привязка Telegram-аккаунта к записи сотрудника выполняется только по
+# одноразовому приглашению (create_invite / redeem_invite). Номер телефона
+# не доказывает владение записью, поэтому привязки по одному номеру нет.
+def _hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_invite(phone_number, issued_by=None):
+    """Создаёт одноразовый код входа для активной записи без привязки.
+
+    В employees.json хранятся только хеш кода, срок действия и Telegram ID
+    выдавшего. Повторный вызов заменяет прежний код. Возвращает сам код
+    (его нужно сразу показать админу) или None, если выдать код нельзя.
+    """
     normalized_phone = normalize_phone(phone_number)
+    if not normalized_phone:
+        return None
+    employees = load_json("employees.json")
     target = next(
-        (employee for employee in employees
-         if normalize_phone(employee.get("phone_number")) == normalized_phone),
+        (item for item in employees
+         if normalize_phone(item.get("phone_number")) == normalized_phone),
         None
     )
-    if target is None:
-        return False, "not_found", None
+    if target is None or target.get("user_id") is not None:
+        return None
+    if target.get("status", "active") != "active":
+        return None
 
-    if target.get("user_id") not in (None, user_id):
-        return False, "phone_already_bound", None
+    now = datetime.now()
+    token = secrets.token_urlsafe(16)
+    target["invite_hash"] = _hash_token(token)
+    target["invite_expires"] = (
+        now + timedelta(hours=INVITE_TTL_HOURS)
+    ).isoformat(timespec="seconds")
+    target["invite_issued_by"] = issued_by
+    target["invite_issued_at"] = now.isoformat(timespec="seconds")
+    save_json("employees.json", employees)
+    return token
 
-    for employee in employees:
-        if employee is not target and employee.get("user_id") == user_id:
-            return False, "user_already_bound", None
 
+def redeem_invite(token, user_id):
+    """Привязывает Telegram-аккаунт к записи по коду из ссылки-приглашения.
+
+    Возвращает (успех, причина, запись). Причина "invalid" одинакова для
+    неверного, использованного и просроченного кода и для приостановленной
+    записи, чтобы по ответам нельзя было подбирать коды. После успешного
+    входа код удаляется, а кто и когда его выдал остаётся в записи
+    (invited_by, invited_at). Расписание синхронизируется с Telegram ID так
+    же, как раньше при привязке.
+    """
+    if not isinstance(token, str) or not _INVITE_TOKEN_RE.fullmatch(token):
+        return False, "invalid", None
+
+    employees = load_json("employees.json")
+    digest = _hash_token(token)
+    target = next(
+        (item for item in employees
+         if isinstance(item.get("invite_hash"), str)
+         and hmac.compare_digest(item["invite_hash"], digest)),
+        None
+    )
+    if target is None or target.get("user_id") is not None:
+        return False, "invalid", None
+    if target.get("status", "active") != "active":
+        return False, "invalid", None
+    try:
+        expired = datetime.fromisoformat(target["invite_expires"]) < datetime.now()
+    except (KeyError, TypeError, ValueError):
+        expired = True
+    if expired:
+        return False, "invalid", None
+
+    if any(item is not target and item.get("user_id") == user_id for item in employees):
+        return False, "user_already_bound", None
+
+    now = datetime.now().isoformat(timespec="seconds")
     target["user_id"] = user_id
+    target["invited_by"] = target.pop("invite_issued_by", None)
+    target["invited_at"] = target.pop("invite_issued_at", None)
+    target.pop("invite_hash", None)
+    target.pop("invite_expires", None)
     target.setdefault("role", "employee")
     target.setdefault("status", "active")
-    target.setdefault("registered_at", datetime.now().isoformat(timespec="seconds"))
+    if not target.get("registered_at"):
+        target["registered_at"] = now
     save_json("employees.json", employees)
-    _sync_schedule_employee(normalized_phone, target)
-    return True, "ok", target
+    _sync_schedule_employee(normalize_phone(target.get("phone_number")), target)
+    return True, "ok", dict(target)
+
+
+def get_invite_state(employee):
+    """Состояние входа записи: ("linked"|"pending"|"expired"|"none", срок или None)."""
+    if employee.get("user_id") is not None:
+        return "linked", None
+    if not employee.get("invite_hash"):
+        return "none", None
+    try:
+        expires = datetime.fromisoformat(employee["invite_expires"])
+    except (KeyError, TypeError, ValueError):
+        return "expired", None
+    return ("expired" if expires < datetime.now() else "pending"), expires
+
+
+def get_unlinked_employees():
+    """Активные записи без привязанного Telegram-аккаунта."""
+    return [
+        item for item in load_json("employees.json")
+        if item.get("user_id") is None and item.get("status", "active") == "active"
+    ]
 
 
 def add_employee(user_id, phone_number, first_name, last_name):
@@ -357,6 +447,7 @@ def start_shift(user_id, employee_name=None):
         shift["employee_name"] = str(employee_name).strip()
     shifts.append(shift)
     save_json("shifts.json", shifts)
+
 
 
 def end_shift(user_id):
