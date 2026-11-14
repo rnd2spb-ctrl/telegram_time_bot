@@ -31,7 +31,7 @@ class FollowupFixTests(unittest.TestCase):
              patch.object(bot, "get_user_role", return_value=None), \
              patch.object(bot, "complete_phone_identification", new=AsyncMock()) as bind:
             asyncio.run(bot.button_handler(second, context))
-        bind.assert_awaited_once_with(second, "+79990000099")
+        bind.assert_awaited_once_with(second, context, "+79990000099")
 
     def test_role_change_list_includes_unbound_and_linked_records(self):
         """Проверяет список сотрудников с привязанным и непривязанным Telegram."""

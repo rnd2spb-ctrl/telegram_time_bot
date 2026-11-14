@@ -168,7 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_phone_keyboard()
     )
 
-async def complete_phone_identification(update: Update, phone_number: str):
+async def complete_phone_identification(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str):
     """Проверяет номер телефона и безопасно привязывает сотрудника к Telegram ID."""
 
     user = update.effective_user
@@ -216,7 +216,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not contact or contact.user_id != user.id:
         await update.message.reply_text('Отправьте свой контакт кнопкой «Поделиться контактом».', reply_markup=get_phone_keyboard())
         return
-    await complete_phone_identification(update, contact.phone_number)
+    await complete_phone_identification(update, context, contact.phone_number)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает основные кнопки: смены, время, расписание, сотрудников и отчеты."""
@@ -228,7 +228,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if role is None:
         phone = text.strip()
         if context.user_data.get('awaiting_phone') and re.fullmatch(r'\+?\d{7,15}', phone):
-            await complete_phone_identification(update, phone)
+            await complete_phone_identification(update, context, phone)
         else:
             await start(update, context)
         return
@@ -1149,6 +1149,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Логирует необработанную ошибку и сообщает пользователю, что действие не выполнено."""
+    logger.error('Необработанная ошибка в обработчике', exc_info=context.error)
+    message = getattr(update, 'effective_message', None)
+    if message is not None:
+        try:
+            await message.reply_text('⚠️ Произошла ошибка, действие не выполнено. Попробуйте ещё раз или сообщите владельцу.')
+        except Exception:
+            logger.exception('Не удалось отправить сообщение об ошибке')
+
 def main():
     """Создает приложение Telegram, регистрирует обработчики и запускает polling."""
 
@@ -1161,6 +1171,7 @@ def main():
     employee_edit_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Редактировать сотрудника|Назначить/снять администратора)$'), button_handler)], states={EDIT_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), select_employee_for_edit)], EDIT_EMPLOYEE_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), set_selected_employee_role)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     employee_management_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Изменить данные|Уволить сотрудника|Удалить сотрудника|Удалить ошибочные записи)$'), button_handler)], states={MANAGE_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_select)], MANAGE_EMPLOYEE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_name)], MANAGE_EMPLOYEE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_phone)], MANAGE_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     schedule_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Управление графиком$'), button_handler)], states={SCHEDULE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_menu_action)], SCHEDULE_SELECT_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_select_entry)], GET_SCHEDULE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_date)], GET_SCHEDULE_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_employee)], GET_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_time)], SCHEDULE_END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_end_time)], SCHEDULE_DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_delete_confirm)], SCHEDULE_DELETE_INVALID_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_select)], SCHEDULE_DELETE_INVALID_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
+    application.add_error_handler(error_handler)
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('whoami', whoami))
     application.add_handler(MessageHandler(filters.CONTACT, contact_handler))
