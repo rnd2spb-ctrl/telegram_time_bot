@@ -142,7 +142,8 @@ class FollowupFixTests(unittest.TestCase):
         context = FakeContext({"menu_parent": "main"})
         with patch.object(bot, "get_user_role", return_value="admin"):
             asyncio.run(bot.cancel(update, context))
-        self.assertEqual(update.message.replies[-1][0], "Главное меню:")
+        self.assertTrue(update.message.replies[-1][0].endswith(" >"))
+        self.assertNotEqual(update.message.replies[-1][0], "Главное меню:")
 
     def test_schedule_minutes_are_validated_in_database(self):
         """Проверяет проверку времени смены на уровне базы данных."""

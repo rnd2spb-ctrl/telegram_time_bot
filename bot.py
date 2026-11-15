@@ -189,25 +189,6 @@ async def complete_phone_identification(update: Update, context: ContextTypes.DE
     audit_action(update, 'employee_linked', target_user_id=user.id, details={'employee_name': ' '.join((part for part in (employee.get('last_name'), employee.get('first_name')) if part)), 'phone_number': employee.get('phone_number')})
     await update.message.reply_text(f'\u0414\u043e\u0431\u0440\u043e \u043f\u043e\u0436\u0430\u043b\u043e\u0432\u0430\u0442\u044c, {current_user_prompt_label(user, employee, role)}!', reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner'))
 
-async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает Telegram ID, ФИО и роль; затем восстанавливает главное меню."""
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text('\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f Telegram.')
-        return
-    employee = get_employee_by_user_id(user.id)
-    role = get_user_role(user.id)
-    role_names = {'owner': '\u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446', 'admin': '\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440', 'employee': '\u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a'}
-    first_name = employee.get('first_name') if employee else user.first_name
-    last_name = employee.get('last_name') if employee else user.last_name
-    full_name = ' '.join(part for part in (last_name, first_name) if part) or '\u0438\u043c\u044f \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e'
-    role_name = role_names.get(role, '\u043d\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u043d / \u0434\u043e\u0441\u0442\u0443\u043f \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442')
-    label = current_user_prompt_label(user, employee, role)
-    await update.message.reply_text(
-        f'\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: {label}\n\u0424\u0418\u041e: {full_name}\nTelegram ID: {user.id}\n\u0420\u043e\u043b\u044c: {role_name}',
-        reply_markup=get_main_keyboard(is_admin_role(role), role == 'owner')
-    )
-
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принимает контакт Telegram и разрешает привязку только собственного контакта."""
 
@@ -393,6 +374,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(report, reply_markup=get_main_keyboard(True, role == 'owner'))
         return
     if text == 'На главную' or text == BACK_BUTTON:
+        # Сюда попадаем только вне диалога, то есть из самого меню: возврат всегда в главное меню.
+        context.user_data['menu_parent'] = 'main'
         await cancel(update, context)
         return ConversationHandler.END
     await start(update, context)
@@ -1145,7 +1128,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = 'Управление расписанием. Выберите действие:'
     else:
         markup = get_main_keyboard(is_admin_role(role), role == 'owner')
-        message = 'Главное меню:'
+        message = current_user_prompt_label(update.effective_user, None, role)
     await update.message.reply_text(message, reply_markup=markup)
     return ConversationHandler.END
 
@@ -1173,7 +1156,6 @@ def main():
     schedule_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Управление графиком$'), button_handler)], states={SCHEDULE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_menu_action)], SCHEDULE_SELECT_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_select_entry)], GET_SCHEDULE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_date)], GET_SCHEDULE_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_employee)], GET_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_time)], SCHEDULE_END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_end_time)], SCHEDULE_DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_delete_confirm)], SCHEDULE_DELETE_INVALID_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_select)], SCHEDULE_DELETE_INVALID_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), schedule_invalid_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('whoami', whoami))
     application.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     application.add_handler(add_employee_conv)
     application.add_handler(employee_edit_conv)

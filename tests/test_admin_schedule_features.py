@@ -112,45 +112,6 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         self.assertEqual(state, bot.MANAGE_EMPLOYEE_NAME)
         self.assertEqual(context.user_data["manage_employee_phone"], target_admin["phone_number"])
 
-    def test_whoami_reports_id_role_and_full_name(self):
-        """Проверяет вывод Telegram ID, ФИО и роли командой /whoami."""
-        employee = {"user_id": 201, "first_name": "Petr", "last_name": "\u041f\u0435\u0442\u0440\u043e\u0432", "role": "admin", "status": "active"}
-        update = FakeUpdate("/whoami", 201)
-        with patch.object(bot, "get_employee_by_user_id", return_value=employee), \
-             patch.object(bot, "get_user_role", return_value="admin"):
-            asyncio.run(bot.whoami(update, FakeContext()))
-        message = update.message.replies[-1][0]
-        self.assertIn("201", message)
-        self.assertIn("\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440", message)
-        self.assertIn("\u041f\u0435\u0442\u0440\u043e\u0432 Petr", message)
-
-    def test_whoami_restores_role_appropriate_main_menu(self):
-        """Проверяет восстановление главного меню после /whoami."""
-        cases = (
-            ("owner", True, True),
-            ("admin", True, False),
-            ("employee", False, False),
-        )
-        for role, has_admin_access, is_owner in cases:
-            with self.subTest(role=role):
-                user_id = 100 if role == "owner" else 201
-                employee = {
-                    "user_id": user_id,
-                    "first_name": "Test",
-                    "last_name": "User",
-                    "role": role,
-                    "status": "active",
-                }
-                update = FakeUpdate("/whoami", user_id)
-                markup = object()
-                with patch.object(bot, "get_employee_by_user_id", return_value=employee):
-                    with patch.object(bot, "get_user_role", return_value=role):
-                        with patch.object(bot, "get_main_keyboard", return_value=markup) as keyboard:
-                            asyncio.run(bot.whoami(update, FakeContext()))
-
-                self.assertIs(update.message.replies[-1][1]["reply_markup"], markup)
-                keyboard.assert_called_once_with(has_admin_access, is_owner)
-
     def test_invalid_schedule_cleanup_flow_supports_list_and_confirmation(self):
         """Проверяет выбор нескольких ошибочных записей и подтверждение удаления."""
         records = [
@@ -291,8 +252,8 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
         dismiss.assert_called_once_with(target_admin["phone_number"], protected_user_id=bot.config.OWNER_ID)
         self.assertIn("\u0443\u0432\u043e\u043b\u0435\u043d", update.message.replies[-1][0])
 
-    def test_main_registers_whoami_and_invalid_schedule_states(self):
-        """Проверяет регистрацию команды /whoami и состояний очистки расписания."""
+    def test_main_registers_invalid_schedule_states_and_no_whoami(self):
+        """Проверяет, что команды /whoami нет, а состояния очистки расписания зарегистрированы."""
         class FakeApplication:
             """Имитирует приложение Telegram для проверки регистрации обработчиков."""
             def __init__(self):
@@ -301,6 +262,9 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
             def add_handler(self, handler):
                 """Сохраняет зарегистрированный обработчик для проверки."""
                 self.handlers.append(handler)
+            def add_error_handler(self, callback):
+                """Принимает общий обработчик ошибок без сохранения."""
+                return None
             def run_polling(self):
                 """Имитирует запуск polling без подключения к Telegram."""
                 return None
@@ -314,7 +278,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
              patch.object(bot.Application, "builder", return_value=builder):
             bot.main()
         command_names = [command for handler in fake_app.handlers if isinstance(handler, bot.CommandHandler) for command in handler.commands]
-        self.assertIn("whoami", command_names)
+        self.assertNotIn("whoami", command_names)
         conversations = [handler for handler in fake_app.handlers if isinstance(handler, bot.ConversationHandler)]
         schedule_conversation = next(handler for handler in conversations if bot.SCHEDULE_DELETE_INVALID_SELECT in handler.states)
         self.assertIn(bot.SCHEDULE_DELETE_INVALID_CONFIRM, schedule_conversation.states)
