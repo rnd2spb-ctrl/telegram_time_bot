@@ -274,7 +274,7 @@ class FollowupFixTests(unittest.TestCase):
             # Диалог уже завершен; второе нажатие попадает в общий обработчик кнопок.
             asyncio.run(bot.button_handler(second_update, context))
 
-        self.assertEqual(second_update.message.replies[-1][0], "Главное меню:")
+        self.assertEqual(second_update.message.replies[-1][0], "Test >")
         self.assertEqual(context.user_data["menu_parent"], "main")
 
     def test_cancel_returns_to_parent_schedule_menu(self):
@@ -302,7 +302,7 @@ class FollowupFixTests(unittest.TestCase):
             # After the conversation ends, the next press is handled globally.
             asyncio.run(bot.button_handler(second_update, context))
 
-        self.assertEqual(second_update.message.replies[-1][0], "\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e:")
+        self.assertEqual(second_update.message.replies[-1][0], "Test >")
         self.assertEqual(context.user_data["menu_parent"], "main")
 
     def test_cancel_from_top_level_submenu_returns_to_main_menu(self):

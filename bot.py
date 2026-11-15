@@ -46,7 +46,8 @@ def employee_prompt_label(employee):
         surname = full_name.split()[0] if full_name else '\u0411\u0435\u0437 \u0444\u0430\u043c\u0438\u043b\u0438\u0438'
     role = employee.get('role') or 'employee'
     suffix = ' (\u0430\u0434\u043c\u0438\u043d)' if role == 'admin' else ''
-    return f'{surname}{suffix} >'
+    status_suffix = ' (\u0443\u0432\u043e\u043b\u0435\u043d)' if employee.get('status') == 'dismissed' else ''
+    return f'{surname}{suffix}{status_suffix} >'
 
 def schedule_entry_prompt_label(entry):
     """Определяет подпись сотрудника для строки расписания."""
@@ -757,8 +758,7 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
             suffix = ' (админ)' if item.get('role') == 'admin' else ''
             phone_label = f' — {item["employee_phone"]}' if item.get('employee_phone') else ''
             lines.append(f'{number}. {item["employee_name"]}{suffix}{phone_label}')
-        await update.message.reply_text('\
-'.join(lines), reply_markup=get_dialog_keyboard())
+        await update.message.reply_text('\n\n'.join(lines), reply_markup=get_dialog_keyboard())
         return GET_SCHEDULE_EMPLOYEE
 
     context.user_data['schedule_entry_ids'] = [item['id'] for item in entries]
@@ -767,8 +767,7 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
         f'{index}. {schedule_entry_prompt_label(item)} — {item.get("date")} — {item.get("start_time")}–{item.get("end_time")}'
         for index, item in enumerate(entries, 1)
     )
-    await update.message.reply_text('\
-'.join(lines), reply_markup=get_dialog_keyboard())
+    await update.message.reply_text('\n\n'.join(lines), reply_markup=get_dialog_keyboard())
     return SCHEDULE_SELECT_ENTRY
 
 async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -801,7 +800,7 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
         lines = [f'Будут удалены смены: {len(entries)}.']
         lines.extend(f'{number}. {_schedule_entry_label(entry)}' for number, entry in enumerate(entries, 1))
         lines.append('Введите 1 для подтверждения удаления или 2 для отмены.')
-        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        await update.message.reply_text('\n\n'.join(lines), reply_markup=get_dialog_keyboard())
         return SCHEDULE_DELETE_CONFIRM
     if not value.isdigit() or not 1 <= int(value) <= len(entry_ids):
         await update.message.reply_text('Введите номер смены из списка.')
@@ -884,7 +883,7 @@ async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f'Будут удалены смены сотрудника {selected_employee.get("employee_name", "")}: {len(matching)}.']
         lines.extend(f'• {_schedule_entry_label(item)}' for item in matching)
         lines.append('Введите 1 для подтверждения или 2 для отмены.')
-        await update.message.reply_text('\n'.join(lines), reply_markup=get_dialog_keyboard())
+        await update.message.reply_text('\n\n'.join(lines), reply_markup=get_dialog_keyboard())
         return SCHEDULE_DELETE_CONFIRM
 
     role = get_user_role(update.effective_user.id)
@@ -917,12 +916,34 @@ async def schedule_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not value.isdigit() or not 1 <= int(value) <= len(options):
             await update.message.reply_text('Введите номер сотрудника из списка.')
             return GET_SCHEDULE_EMPLOYEE
-        context.user_data['schedule_delete_employee'] = dict(options[int(value) - 1])
+        selected_employee = dict(options[int(value) - 1])
+        context.user_data['schedule_delete_employee'] = selected_employee
         month = datetime.now()
-        await update.message.reply_text(
-            f'Введите день/дни текущего месяца ({month:%m.%Y}), например 5 или 13,15,17 или диапазон 13-15:',
-            reply_markup=get_dialog_keyboard()
+        current_month = month.strftime('%Y-%m-')
+        current_entries = [
+            entry for entry in _manageable_schedule_entries(get_user_role(update.effective_user.id))
+            if entry.get('employee_id') == selected_employee.get('employee_id')
+            and str(entry.get('date', '')).startswith(current_month)
+        ]
+        current_entries.sort(key=lambda item: (item.get('date', ''), item.get('start_time', '')))
+        if not current_entries:
+            clear_schedule_state(context)
+            await update.message.reply_text(
+                '\u0423 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0433\u043e \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435\u0442 \u0441\u043c\u0435\u043d \u0432 \u0442\u0435\u043a\u0443\u0449\u0435\u043c \u043c\u0435\u0441\u044f\u0446\u0435.',
+                reply_markup=get_schedule_management_menu(context)
+            )
+            return SCHEDULE_MENU
+        lines = [
+            f'\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430 {selected_employee.get("employee_name", "")} \u043d\u0430 {month:%m.%Y}:'
+        ]
+        lines.extend(
+            f'{number}. {_schedule_entry_label(entry)}'
+            for number, entry in enumerate(current_entries, 1)
         )
+        lines.append(
+            f'\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0434\u0435\u043d\u044c/\u0434\u043d\u0438 \u0442\u0435\u043a\u0443\u0449\u0435\u0433\u043e \u043c\u0435\u0441\u044f\u0446\u0430 ({month:%m.%Y}), \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 5 \u0438\u043b\u0438 13,15,17 \u0438\u043b\u0438 \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d 13-15:'
+        )
+        await update.message.reply_text('\n\n'.join(lines), reply_markup=get_dialog_keyboard())
         return GET_SCHEDULE_DATE
 
     options = context.user_data.get('schedule_employee_options', [])

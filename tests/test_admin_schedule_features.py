@@ -408,7 +408,7 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
              patch.object(bot, "get_all_employees", return_value=[dismissed_admin]):
             asyncio.run(bot.button_handler(update, FakeContext()))
         text = update.message.replies[-1][0]
-        self.assertIn("\u2620\ufe0f \u041f\u0435\u0442\u0440\u043e\u0432 (\u0430\u0434\u043c\u0438\u043d) >", text)
+        self.assertIn("\u2620\ufe0f \u041f\u0435\u0442\u0440\u043e\u0432 (\u0430\u0434\u043c\u0438\u043d) (\u0443\u0432\u043e\u043b\u0435\u043d) >", text)
         self.assertIn("dismissed", text)
 
 
