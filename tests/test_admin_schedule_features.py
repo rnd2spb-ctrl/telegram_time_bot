@@ -51,6 +51,20 @@ class FakeContext:
 
 class AdminAndScheduleFeatureTests(unittest.TestCase):
     """Проверки прав администратора, сотрудников и управления расписанием."""
+
+    def test_get_all_shifts_returns_closed_and_active_records(self):
+        """Report data includes closed shifts and the currently active shift only."""
+        records = [
+            {"user_id": 1, "status": "closed"},
+            {"user_id": 2, "status": "active"},
+            {"user_id": 3, "status": "draft"},
+        ]
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder):
+            database.save_json("shifts.json", records)
+            loaded = database.get_all_shifts(days=10**9)
+
+        self.assertEqual([item["status"] for item in loaded], ["closed", "active"])
+
     def test_number_selection_parser(self):
         """Проверяет разбор одиночных номеров, списков и диапазонов."""
         self.assertEqual(bot.parse_number_selection("1,3,5", 5), [1, 3, 5])
@@ -298,16 +312,23 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
             def __init__(self):
                 """Создает тестовое сообщение с заданным текстом."""
                 self.handlers = []
+                self.error_handlers = []
             def add_handler(self, handler):
                 """Сохраняет зарегистрированный обработчик для проверки."""
                 self.handlers.append(handler)
+            def add_error_handler(self, handler):
+                """Сохраняет зарегистрированный обработчик ошибок."""
+                self.error_handlers.append(handler)
             def run_polling(self):
                 """Имитирует запуск polling без подключения к Telegram."""
                 return None
 
         fake_app = FakeApplication()
         builder = type("Builder", (), {})()
+        builder.callbacks = {}
         builder.token = lambda token: builder
+        builder.post_init = lambda callback: (builder.callbacks.__setitem__("post_init", callback) or builder)
+        builder.post_shutdown = lambda callback: (builder.callbacks.__setitem__("post_shutdown", callback) or builder)
         builder.build = lambda: fake_app
         with patch.object(bot.config, "BOT_TOKEN", "test-token"), \
              patch.object(bot.config, "OWNER_ID", 100), \
@@ -315,6 +336,9 @@ class AdminAndScheduleFeatureTests(unittest.TestCase):
             bot.main()
         command_names = [command for handler in fake_app.handlers if isinstance(handler, bot.CommandHandler) for command in handler.commands]
         self.assertIn("whoami", command_names)
+        self.assertIn(bot.error_handler, fake_app.error_handlers)
+        self.assertIs(builder.callbacks["post_init"], bot.start_shift_auto_close_monitor)
+        self.assertIs(builder.callbacks["post_shutdown"], bot.stop_shift_auto_close_monitor)
         conversations = [handler for handler in fake_app.handlers if isinstance(handler, bot.ConversationHandler)]
         schedule_conversation = next(handler for handler in conversations if bot.SCHEDULE_DELETE_INVALID_SELECT in handler.states)
         self.assertIn(bot.SCHEDULE_DELETE_INVALID_CONFIRM, schedule_conversation.states)

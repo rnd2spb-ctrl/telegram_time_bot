@@ -1,5 +1,6 @@
 """Точка входа и обработчики Telegram-бота: авторизация, сотрудники, смены и отчеты."""
 
+import asyncio
 import logging
 import calendar
 import re
@@ -24,6 +25,12 @@ def clear_schedule_state(context):
 
 MENU_BUTTONS = ('Начать смену', 'Закончить смену', 'График смен', 'Мое время', 'Редактировать', 'Управление графиком', 'Добавить смену', 'Изменить смену', 'Удалить смену', 'Удалить ошибочные смены', 'Добавить сотрудника', 'Список сотрудников', 'Редактировать сотрудника', 'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи', 'Назначить/снять администратора', 'Отчет за неделю', 'Отчет за месяц', 'На главную', '⬅️ Назад в меню')
 MENU_BUTTON_PATTERN = '^(?:' + '|'.join((re.escape(label) for label in MENU_BUTTONS)) + ')$'
+
+
+def get_employee_management_menu(context, is_owner=False):
+    """Показывает меню сотрудников и фиксирует, что его родитель — главное меню."""
+    context.user_data['menu_parent'] = 'main'
+    return get_employee_management_keyboard(is_owner)
 
 
 # --- Роли, авторизация и идентификация ---
@@ -218,6 +225,12 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await complete_phone_identification(update, context, contact.phone_number)
 
+def get_schedule_management_menu(context):
+    """Render schedule management keyboard and reset its parent to main."""
+    context.user_data["menu_parent"] = "main"
+    return get_schedule_management_keyboard()
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает основные кнопки: смены, время, расписание, сотрудников и отчеты."""
 
@@ -270,14 +283,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         schedule_message = format_schedule_message()
         await update.message.reply_text(schedule_message)
         return
-    if text == 'Мое время':
+    if text == '\u041c\u043e\u0435 \u0432\u0440\u0435\u043c\u044f':
         if not employee and role != 'owner':
-            await update.message.reply_text('Для просмотра личного времени сначала привяжите свой номер телефона через /start.')
+            await update.message.reply_text('\u0414\u043b\u044f \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430 \u043b\u0438\u0447\u043d\u043e\u0433\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u0438 \u0441\u043d\u0430\u0447\u0430\u043b\u0430 \u043f\u0440\u0438\u0432\u044f\u0436\u0438\u0442\u0435 \u0441\u0432\u043e\u0439 \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430 \u0447\u0435\u0440\u0435\u0437 /start.')
             return
         shifts = get_user_shifts(user.id, 7)
         total_time = calculate_work_time(shifts)
         salary = calculate_salary(shifts)
-        await update.message.reply_text(f'⏱ Ваше время за последнюю неделю: {total_time}\n💵 Ваша зарплата: {salary} руб.')
+        message = f'\u23f1 \u0412\u0430\u0448\u0435 \u0432\u0440\u0435\u043c\u044f \u0437\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u043d\u0435\u0434\u0435\u043b\u044e: {total_time}\n\U0001f4b5 \u0412\u0430\u0448\u0430 \u0437\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {salary} \u0440\u0443\u0431.'
+        active_shift = get_active_shift(user.id)
+        if active_shift:
+            started_at = datetime.strptime(active_shift['shift_start'], '%Y-%m-%d %H:%M:%S')
+            message += f'\n\u25b6\ufe0f \u0421\u0435\u0439\u0447\u0430\u0441 \u0438\u0434\u0435\u0442 \u0441\u043c\u0435\u043d\u0430, \u043d\u0430\u0447\u0430\u0442\u0430\u044f {started_at:%d.%m.%Y \u0432 %H:%M}.'
+        else:
+            message += '\n\u25b6\ufe0f \u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u0441\u043c\u0435\u043d\u044b \u043d\u0435\u0442. \u0423\u0447\u0435\u0442 \u043d\u0430\u0447\u043d\u0435\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u043d\u0430\u0436\u0430\u0442\u0438\u044f \u00ab\u041d\u0430\u0447\u0430\u0442\u044c \u0441\u043c\u0435\u043d\u0443\u00bb.'
+        await update.message.reply_text(message)
         return
     if text == 'Добавить сотрудника':
         context.user_data['menu_parent'] = 'employees'
@@ -290,7 +310,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_admin(update, context):
             return
         clear_schedule_state(context)
-        await update.message.reply_text('Управление расписанием. Выберите действие:', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Управление расписанием. Выберите действие:', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     if text == 'Список сотрудников':
         if not await require_admin(update, context):
@@ -318,7 +338,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         employees = [item for item in get_all_employees() if item.get('user_id') != config.OWNER_ID and item.get('role') != 'owner' and item.get('status', 'active') == 'active' and item.get('phone_number')]
         if not employees:
-            await update.message.reply_text('Нет активных сотрудников, которым можно изменить роль.', reply_markup=get_employee_management_keyboard(True))
+            await update.message.reply_text('Нет активных сотрудников, которым можно изменить роль.', reply_markup=get_employee_management_menu(context, True))
             return ConversationHandler.END
         context.user_data['editable_employee_phones'] = [item['phone_number'] for item in employees]
         lines = ['Выберите сотрудника, введя номер из списка:']
@@ -343,7 +363,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             status_marker = '☠️ ' if item.get('status') == 'dismissed' else ''
             lines.append(f'{status_marker}{employee_prompt_label(item)} — {phone} — {item.get('status', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')}')
-        await update.message.reply_text('\n'.join(lines), reply_markup=get_employee_management_keyboard(role == 'owner'))
+        await update.message.reply_text('\n'.join(lines), reply_markup=get_employee_management_menu(context, role == 'owner'))
         return
     if text in {'Изменить данные', 'Уволить сотрудника', 'Удалить сотрудника', 'Удалить ошибочные записи'}:
         context.user_data['menu_parent'] = 'employees'
@@ -354,7 +374,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == 'delete_invalid':
             records = get_invalid_employee_records()
             if not records:
-                await update.message.reply_text('Ошибочных записей нет.', reply_markup=get_employee_management_keyboard(role == 'owner'))
+                await update.message.reply_text('Ошибочных записей нет.', reply_markup=get_employee_management_menu(context, role == 'owner'))
                 return ConversationHandler.END
             context.user_data['manage_employee_indexes'] = [x['index'] for x in records]
             context.user_data['manage_employee_invalid_records'] = records
@@ -373,7 +393,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         continue
                 employees.append(item)
             if not employees:
-                await update.message.reply_text('Нет сотрудников, доступных для этой операции.', reply_markup=get_employee_management_keyboard(role == 'owner'))
+                await update.message.reply_text('Нет сотрудников, доступных для этой операции.', reply_markup=get_employee_management_menu(context, role == 'owner'))
                 return ConversationHandler.END
             context.user_data['manage_employee_phones'] = [x['phone_number'] for x in employees]
             lines = ['Выберите сотрудника, введя номер из списка:']
@@ -449,7 +469,7 @@ async def set_selected_employee_role(update: Update, context: ContextTypes.DEFAU
             result = '✅ Роль успешно изменена: ' + ('администратор.' if new_role == 'admin' else 'обычный сотрудник.') if changed else '❌ Не удалось изменить роль: ' + reason
     context.user_data.pop('editing_employee_phone', None)
     context.user_data.pop('editable_employee_phones', None)
-    await update.message.reply_text(result, reply_markup=get_employee_management_keyboard(True))
+    await update.message.reply_text(result, reply_markup=get_employee_management_menu(context, True))
     return ConversationHandler.END
 
 # --- Добавление и управление сотрудниками ---
@@ -481,7 +501,7 @@ async def manage_employee_select(update: Update, context: ContextTypes.DEFAULT_T
         if success:
             audit_action(update, 'invalid_employee_record_deleted', details={'record_index': selected_index, 'employee_name': invalid_record.get('name'), 'phone_value': invalid_record.get('phone')})
         clear_manage_employee_state(context)
-        await update.message.reply_text('✅ Ошибочная запись удалена.' if success else '❌ Запись уже изменилась или не является ошибочной.', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text('✅ Ошибочная запись удалена.' if success else '❌ Запись уже изменилась или не является ошибочной.', reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
         return ConversationHandler.END
     phones = context.user_data.get('manage_employee_phones', [])
     if not 1 <= number <= len(phones):
@@ -543,7 +563,7 @@ async def manage_employee_phone(update: Update, context: ContextTypes.DEFAULT_TY
         audit_action(update, 'employee_updated', target_user_id=selected_employee.get('user_id'), details={'old_name': old_name, 'new_name': new_name, 'old_phone': old_phone, 'new_phone': new_phone})
     messages = {'ok': '✅ Данные сотрудника обновлены.', 'invalid_phone': '❌ Некорректный номер телефона.', 'duplicate_phone': '❌ Такой номер уже используется.', 'not_found': '❌ Сотрудник не найден.'}
     clear_manage_employee_state(context)
-    await update.message.reply_text(messages.get(reason, '❌ Не удалось обновить данные.'), reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+    await update.message.reply_text(messages.get(reason, '❌ Не удалось обновить данные.'), reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
     return ConversationHandler.END
 
 async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -560,7 +580,7 @@ async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_
     selected_employee = get_employee_by_phone(phone) if phone else None
     if action in {'delete', 'dismiss'} and (not selected_employee or selected_employee.get('user_id') == config.OWNER_ID):
         clear_manage_employee_state(context)
-        await update.message.reply_text('❌ Нельзя изменять запись владельца.', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text('❌ Нельзя изменять запись владельца.', reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
         return ConversationHandler.END
     if choice == '2':
         result = 'Операция отменена.'
@@ -583,7 +603,7 @@ async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_
         else:
             result = '❌ Не удалось удалить запись сотрудника.'
     clear_manage_employee_state(context)
-    await update.message.reply_text(result, reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+    await update.message.reply_text(result, reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
     return ConversationHandler.END
 
 async def add_employee_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -623,9 +643,9 @@ async def add_employee_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = name_parts[1] if len(name_parts) > 1 else name_parts[0]
     if add_employee(None, phone, first_name, last_name):
         audit_action(update, 'employee_added', details={'employee_name': full_name, 'phone_number': phone})
-        await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text(f'✅ Сотрудник {full_name} успешно добавлен!', reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
     else:
-        await update.message.reply_text('❌ Сотрудник с таким номером телефона уже существует.', reply_markup=get_employee_management_keyboard(get_user_role(update.effective_user.id) == 'owner'))
+        await update.message.reply_text('❌ Сотрудник с таким номером телефона уже существует.', reply_markup=get_employee_management_menu(context, get_user_role(update.effective_user.id) == 'owner'))
     context.user_data.pop('new_employee_phone', None)
     return ConversationHandler.END
 
@@ -696,11 +716,11 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
         if records is None:
             await update.message.reply_text(
                 '\u274c \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u043e\u0447\u0438\u0442\u0430\u0442\u044c \u0444\u0430\u0439\u043b \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f. \u041e\u043d \u043f\u043e\u0432\u0440\u0435\u0436\u0434\u0451\u043d \u0438\u043b\u0438 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 JSON; \u0444\u0430\u0439\u043b \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0451\u043d.',
-                reply_markup=get_schedule_management_keyboard()
+                reply_markup=get_schedule_management_menu(context)
             )
             return SCHEDULE_MENU
         if not records:
-            await update.message.reply_text('\u041e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0445 \u0441\u043c\u0435\u043d \u043d\u0435\u0442.', reply_markup=get_schedule_management_keyboard())
+            await update.message.reply_text('\u041e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0445 \u0441\u043c\u0435\u043d \u043d\u0435\u0442.', reply_markup=get_schedule_management_menu(context))
             return SCHEDULE_MENU
         context.user_data['schedule_invalid_indices'] = [item['index'] for item in records]
         context.user_data['schedule_invalid_records'] = records
@@ -719,18 +739,18 @@ async def schedule_menu_action(update: Update, context: ContextTypes.DEFAULT_TYP
         await cancel(update, context)
         return ConversationHandler.END
     if action not in {'\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443', '\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443'}:
-        await update.message.reply_text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043a\u043d\u043e\u043f\u043a\u043e\u0439 \u043c\u0435\u043d\u044e.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043a\u043d\u043e\u043f\u043a\u043e\u0439 \u043c\u0435\u043d\u044e.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     context.user_data['schedule_action'] = 'edit' if action == '\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443' else 'delete'
     entries = _manageable_schedule_entries(role)
     if not entries:
-        await update.message.reply_text('\u041d\u0435\u0442 \u0441\u043c\u0435\u043d, \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('\u041d\u0435\u0442 \u0441\u043c\u0435\u043d, \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     if context.user_data['schedule_action'] == 'delete':
         current_month = datetime.now().strftime('%Y-%m-')
         entries = [item for item in entries if str(item.get('date', '')).startswith(current_month)]
         if not entries:
-            await update.message.reply_text('В текущем месяце нет смен для удаления.', reply_markup=get_schedule_management_keyboard())
+            await update.message.reply_text('В текущем месяце нет смен для удаления.', reply_markup=get_schedule_management_menu(context))
             return SCHEDULE_MENU
         employees_by_id = {}
         employee_records = get_all_employees()
@@ -784,7 +804,7 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
         entries = [get_schedule_entry(schedule_id) for schedule_id in selected_ids]
         if any(entry is None for entry in entries):
             clear_schedule_state(context)
-            await update.message.reply_text('Одна или несколько смен уже недоступны. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
+            await update.message.reply_text('Одна или несколько смен уже недоступны. Обновите список смен.', reply_markup=get_schedule_management_menu(context))
             return SCHEDULE_MENU
         role = get_user_role(update.effective_user.id)
         if role != 'owner' and any(
@@ -792,7 +812,7 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
             for entry in entries
         ):
             clear_schedule_state(context)
-            await update.message.reply_text('❌ Администратор не может удалять смены владельца.', reply_markup=get_schedule_management_keyboard())
+            await update.message.reply_text('❌ Администратор не может удалять смены владельца.', reply_markup=get_schedule_management_menu(context))
             return SCHEDULE_MENU
         context.user_data['schedule_selected_ids'] = selected_ids
         lines = [f'Будут удалены смены: {len(entries)}.']
@@ -808,13 +828,13 @@ async def schedule_select_entry(update: Update, context: ContextTypes.DEFAULT_TY
     role = get_user_role(update.effective_user.id)
     if not entry:
         clear_schedule_state(context)
-        await update.message.reply_text('Выбранная смена уже недоступна. Обновите список смен.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выбранная смена уже недоступна. Обновите список смен.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     is_owner_shift = entry.get('user_id') == config.OWNER_ID or entry.get('employee_id') == f'owner:{config.OWNER_ID}'
     if role != 'owner' and is_owner_shift:
         await update.message.reply_text('❌ Администратор не может изменять смены владельца.')
         clear_schedule_state(context)
-        await update.message.reply_text('Выберите действие:', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Выберите действие:', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     context.user_data['schedule_selected_id'] = schedule_id
     context.user_data['schedule_selected_ids'] = [schedule_id]
@@ -832,7 +852,7 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
         return SCHEDULE_DELETE_CONFIRM
     if choice == '2':
         clear_schedule_state(context)
-        await update.message.reply_text('Удаление отменено.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('Удаление отменено.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     schedule_ids = context.user_data.get('schedule_selected_ids') or [context.user_data.get('schedule_selected_id')]
     role = get_user_role(update.effective_user.id)
@@ -848,7 +868,7 @@ async def schedule_delete_confirm(update: Update, context: ContextTypes.DEFAULT_
     else:
         message = '❌ Не удалось удалить смену. Возможно, запись уже была изменена.'
     clear_schedule_state(context)
-    await update.message.reply_text(message, reply_markup=get_schedule_management_keyboard())
+    await update.message.reply_text(message, reply_markup=get_schedule_management_menu(context))
     return SCHEDULE_MENU
 
 async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -874,7 +894,7 @@ async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if entry.get('employee_id') == employee_id and entry.get('date') in dates]
         if not matching:
             clear_schedule_state(context)
-            await update.message.reply_text('У выбранного сотрудника нет смен на указанные дни.', reply_markup=get_schedule_management_keyboard())
+            await update.message.reply_text('У выбранного сотрудника нет смен на указанные дни.', reply_markup=get_schedule_management_menu(context))
             return SCHEDULE_MENU
         matching.sort(key=lambda item: (item.get('date', ''), item.get('start_time', '')))
         context.user_data['schedule_selected_ids'] = [item['id'] for item in matching]
@@ -888,7 +908,7 @@ async def schedule_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     options = _schedule_employee_options(role)
     if not options:
         clear_schedule_state(context)
-        await update.message.reply_text('\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432 \u0441 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u043c\u0438 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430\u043c\u0438 \u0434\u043b\u044f \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u0441\u043c\u0435\u043d.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('\u041d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432 \u0441 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u043c\u0438 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430\u043c\u0438 \u0434\u043b\u044f \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u0441\u043c\u0435\u043d.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     context.user_data['schedule_employee_options'] = options
     lines = ['\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430, \u0432\u0432\u0435\u0434\u044f \u043d\u043e\u043c\u0435\u0440:']
@@ -978,7 +998,7 @@ async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dates = context.user_data.get('schedule_dates') or ([context.user_data.get('schedule_date')] if context.user_data.get('schedule_date') else [])
     if not start_time or not dates or not all(dates) or not selected:
         clear_schedule_state(context)
-        await update.message.reply_text('\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0439 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c \u0443\u0441\u0442\u0430\u0440\u0435\u043b. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0439 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c \u0443\u0441\u0442\u0430\u0440\u0435\u043b. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     role = get_user_role(update.effective_user.id)
     action = context.user_data.get('schedule_action')
@@ -1062,7 +1082,7 @@ async def schedule_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         message = '\u274c \u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0441 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.'
     clear_schedule_state(context)
-    await update.message.reply_text(message, reply_markup=get_schedule_management_keyboard())
+    await update.message.reply_text(message, reply_markup=get_schedule_management_menu(context))
     return SCHEDULE_MENU
 
 
@@ -1098,7 +1118,7 @@ async def schedule_invalid_confirm(update: Update, context: ContextTypes.DEFAULT
         return SCHEDULE_DELETE_INVALID_CONFIRM
     if choice == '2':
         clear_schedule_state(context)
-        await update.message.reply_text('\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0445 \u0441\u043c\u0435\u043d \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.', reply_markup=get_schedule_management_keyboard())
+        await update.message.reply_text('\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0445 \u0441\u043c\u0435\u043d \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.', reply_markup=get_schedule_management_menu(context))
         return SCHEDULE_MENU
     indices = context.user_data.get('schedule_invalid_selected_indices', [])
     selected_records = context.user_data.get('schedule_invalid_selected_records', [])
@@ -1124,7 +1144,7 @@ async def schedule_invalid_confirm(update: Update, context: ContextTypes.DEFAULT
         }
         message = '\u274c ' + errors.get(reason, '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043e\u0448\u0438\u0431\u043e\u0447\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438. \u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u043e.')
     clear_schedule_state(context)
-    await update.message.reply_text(message, reply_markup=get_schedule_management_keyboard())
+    await update.message.reply_text(message, reply_markup=get_schedule_management_menu(context))
     return SCHEDULE_MENU
 
 # --- Отмена диалогов и запуск приложения ---
@@ -1138,10 +1158,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_manage_employee_state(context)
     parent = context.user_data.get('menu_parent')
     if parent == 'employees' and is_admin_role(role):
-        markup = get_employee_management_keyboard(role == 'owner')
+        markup = get_employee_management_menu(context, role == 'owner')
         message = 'Управление сотрудниками. Выберите действие:'
     elif parent == 'schedule' and is_admin_role(role):
-        markup = get_schedule_management_keyboard()
+        markup = get_schedule_management_menu(context)
         message = 'Управление расписанием. Выберите действие:'
     else:
         markup = get_main_keyboard(is_admin_role(role), role == 'owner')
@@ -1159,6 +1179,36 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception('Не удалось отправить сообщение об ошибке')
 
+async def shift_auto_close_monitor():
+    """Проверяет просроченные смены каждые 30 секунд."""
+    while True:
+        try:
+            closed_shifts = auto_close_overdue_shifts()
+            if closed_shifts:
+                logger.info("Автоматически закрыто смен: %s", len(closed_shifts))
+        except Exception:
+            logger.exception("Не удалось выполнить автозакрытие смен")
+        await asyncio.sleep(30)
+
+
+async def start_shift_auto_close_monitor(application):
+    """Запускает фоновую проверку смен после старта."""
+    application.bot_data["shift_auto_close_task"] = asyncio.create_task(
+        shift_auto_close_monitor()
+    )
+
+
+async def stop_shift_auto_close_monitor(application):
+    """Останавливает фоновую проверку при остановке."""
+    task = application.bot_data.pop("shift_auto_close_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 def main():
     """Создает приложение Telegram, регистрирует обработчики и запускает polling."""
 
@@ -1166,7 +1216,7 @@ def main():
         raise RuntimeError('Не задан BOT_TOKEN. Создайте файл .env по образцу .env.example и укажите новый токен, полученный у @BotFather.')
     if config.OWNER_ID is None:
         raise RuntimeError('Не назначен владелец. Укажите свой числовой Telegram ID в OWNER_ID файла .env.')
-    application = Application.builder().token(config.BOT_TOKEN).build()
+    application = (Application.builder().token(config.BOT_TOKEN).post_init(start_shift_auto_close_monitor).post_shutdown(stop_shift_auto_close_monitor).build())
     add_employee_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^Добавить сотрудника$'), button_handler)], states={ADD_EMPLOYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), add_employee_phone)], GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), add_employee_name)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     employee_edit_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Редактировать сотрудника|Назначить/снять администратора)$'), button_handler)], states={EDIT_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), select_employee_for_edit)], EDIT_EMPLOYEE_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), set_selected_employee_role)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])
     employee_management_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex('^(?:Изменить данные|Уволить сотрудника|Удалить сотрудника|Удалить ошибочные записи)$'), button_handler)], states={MANAGE_EMPLOYEE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_select)], MANAGE_EMPLOYEE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_name)], MANAGE_EMPLOYEE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_phone)], MANAGE_EMPLOYEE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN), manage_employee_confirm)]}, fallbacks=[CommandHandler('cancel', cancel), MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), cancel)])

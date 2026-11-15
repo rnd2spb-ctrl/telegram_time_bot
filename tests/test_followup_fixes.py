@@ -88,6 +88,134 @@ class FollowupFixTests(unittest.TestCase):
         self.assertIn("7ч 15м", update.message.replies[-1][0])
         self.assertIn("1211 руб.", update.message.replies[-1][0])
 
+
+    def test_my_time_is_zero_until_a_shift_is_started(self):
+        """No shift record means bot session time is not counted as work time."""
+        owner_id = 100
+        update = FakeUpdate("\u041c\u043e\u0435 \u0432\u0440\u0435\u043c\u044f", owner_id)
+        with patch.object(bot, "get_employee_by_user_id", return_value=None), \
+             patch.object(bot, "get_user_role", return_value="owner"), \
+             patch.object(bot.config, "OWNER_ID", owner_id), \
+             patch.object(bot, "get_user_shifts", return_value=[]), \
+             patch.object(bot, "get_active_shift", return_value=None):
+            asyncio.run(bot.button_handler(update, FakeContext()))
+
+        message = update.message.replies[-1][0]
+        self.assertIn("0\u0447 0\u043c", message)
+        self.assertIn("\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u0441\u043c\u0435\u043d\u044b \u043d\u0435\u0442", message)
+
+
+    def test_shift_auto_closes_at_2201_with_2100_end_time(self):
+        """Before 22:01 a shift stays open; at 22:01 it closes at 21:00."""
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder):
+            database.save_json("shifts.json", [{
+                "user_id": 201,
+                "shift_start": "2026-11-15 09:00:00",
+                "shift_end": None,
+                "status": "active",
+                "employee_name": "Test Employee",
+            }])
+
+            before_cutoff = datetime(2026, 11, 15, 22, 0, 59)
+            self.assertEqual(database.auto_close_overdue_shifts(now=before_cutoff), [])
+            self.assertIsNotNone(database.get_active_shift(201))
+
+            at_cutoff = datetime(2026, 11, 15, 22, 1, 0)
+            # Use the explicit time for the closure decision and inspect persisted data.
+            closed = database.auto_close_overdue_shifts(now=at_cutoff)
+            self.assertEqual(len(closed), 1)
+            saved = database.load_json("shifts.json")[0]
+            self.assertEqual(saved["status"], "closed")
+            self.assertEqual(saved["shift_end"], "2026-11-15 21:00:00")
+            self.assertTrue(saved["auto_closed"])
+            self.assertIsNone(database.get_active_shift(201))
+
+            audit = database.get_audit_log()
+            self.assertEqual(audit[-1]["action"], "shift_auto_closed")
+            self.assertEqual(audit[-1]["target_user_id"], 201)
+            self.assertEqual(audit[-1]["actor_role"], "system")
+
+    def test_overdue_shift_from_previous_day_is_recovered_at_2100(self):
+        """A shift left open overnight is backdated to 21:00 on its start date."""
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder):
+            database.save_json("shifts.json", [{
+                "user_id": 202,
+                "shift_start": "2026-11-14 09:15:00",
+                "shift_end": None,
+                "status": "active",
+            }])
+            now = datetime(2026, 11, 15, 16, 0, 0)
+            closed = database.auto_close_overdue_shifts(now=now)
+
+            self.assertEqual(len(closed), 1)
+            saved = database.load_json("shifts.json")[0]
+            self.assertEqual(saved["shift_end"], "2026-11-14 21:00:00")
+            self.assertEqual(saved["status"], "closed")
+            self.assertEqual(utils.work_time_seconds([saved]), 42300)
+
+
+    def test_shift_started_after_pvz_close_gets_zero_recorded_duration(self):
+        """A shift started after 21:00 still follows the fixed 21:00 auto-close rule."""
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder):
+            database.save_json("shifts.json", [{
+                "user_id": 205,
+                "shift_start": "2026-11-14 22:26:34",
+                "shift_end": None,
+                "status": "active",
+            }])
+            closed = database.auto_close_overdue_shifts(
+                now=datetime(2026, 11, 15, 10, 0, 0)
+            )
+
+            self.assertEqual(len(closed), 1)
+            saved = database.load_json("shifts.json")[0]
+            self.assertEqual(saved["shift_end"], "2026-11-14 21:00:00")
+            self.assertEqual(utils.work_time_seconds([saved]), 0)
+
+    def test_manual_end_before_2201_uses_actual_end_time(self):
+        """A manual end before the cutoff keeps the actual button-press time."""
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 15, 18, 42, 30)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder), \
+             patch.object(database, "datetime", FixedDateTime):
+            database.save_json("shifts.json", [{
+                "user_id": 203,
+                "shift_start": "2026-11-15 09:00:00",
+                "shift_end": None,
+                "status": "active",
+            }])
+
+            self.assertTrue(database.end_shift(203))
+            saved = database.load_json("shifts.json")[0]
+            self.assertEqual(saved["status"], "closed")
+            self.assertEqual(saved["shift_end"], "2026-11-15 18:42:30")
+            self.assertNotIn("auto_closed", saved)
+
+    def test_manual_end_after_2201_uses_automatic_2100_cutoff(self):
+        """Pressing End after 22:01 cannot replace the scheduled 21:00 close."""
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 15, 22, 1, 5)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(database, "DATA_DIR", folder), \
+             patch.object(database, "datetime", FixedDateTime):
+            database.save_json("shifts.json", [{
+                "user_id": 204,
+                "shift_start": "2026-11-15 09:00:00",
+                "shift_end": None,
+                "status": "active",
+            }])
+
+            self.assertFalse(database.end_shift(204))
+            saved = database.load_json("shifts.json")[0]
+            self.assertEqual(saved["status"], "closed")
+            self.assertEqual(saved["shift_end"], "2026-11-15 21:00:00")
+            self.assertTrue(saved["auto_closed"])
+
     def test_schedule_time_normalizer_accepts_hours_and_minutes(self):
         """Проверяет ввод целых часов и времени с минутами через двоеточие и дефис."""
         self.assertEqual(bot.normalize_schedule_time("9"), "09:00")
@@ -121,12 +249,33 @@ class FollowupFixTests(unittest.TestCase):
         self.assertEqual(context.user_data["schedule_dates"], ["2026-11-13"])
 
     def test_cancel_returns_to_parent_employee_menu(self):
-        """Проверяет возврат из диалога в меню сотрудников."""
+        """Проверяет возврат из диалога в меню сотрудников и сброс родительского меню."""
         update = FakeUpdate("⬅️ Назад в меню", 200)
         context = FakeContext({"menu_parent": "employees"})
         with patch.object(bot, "get_user_role", return_value="admin"):
             asyncio.run(bot.cancel(update, context))
         self.assertEqual(update.message.replies[-1][0], "Управление сотрудниками. Выберите действие:")
+        self.assertEqual(context.user_data["menu_parent"], "main")
+
+    def test_two_consecutive_back_presses_return_to_main_menu(self):
+        """Проверяет два последовательных нажатия «Назад» из подраздела сотрудников."""
+        context = FakeContext({"menu_parent": "employees"})
+        first_update = FakeUpdate("⬅️ Назад в меню", 200)
+        second_update = FakeUpdate("⬅️ Назад в меню", 200)
+
+        with patch.object(bot, "get_user_role", return_value="admin"), patch.object(bot, "get_employee_by_user_id", return_value=None):
+            # Первое нажатие обрабатывается fallback-функцией активного диалога.
+            asyncio.run(bot.cancel(first_update, context))
+            self.assertEqual(
+                first_update.message.replies[-1][0],
+                "Управление сотрудниками. Выберите действие:"
+            )
+
+            # Диалог уже завершен; второе нажатие попадает в общий обработчик кнопок.
+            asyncio.run(bot.button_handler(second_update, context))
+
+        self.assertEqual(second_update.message.replies[-1][0], "Главное меню:")
+        self.assertEqual(context.user_data["menu_parent"], "main")
 
     def test_cancel_returns_to_parent_schedule_menu(self):
         """Проверяет возврат из диалога в меню расписания."""
@@ -135,6 +284,26 @@ class FollowupFixTests(unittest.TestCase):
         with patch.object(bot, "get_user_role", return_value="admin"):
             asyncio.run(bot.cancel(update, context))
         self.assertEqual(update.message.replies[-1][0], "Управление расписанием. Выберите действие:")
+
+
+    def test_schedule_back_resets_parent_and_second_back_goes_to_main(self):
+        """Back from an interrupted schedule operation returns to main after two presses."""
+        context = FakeContext({"menu_parent": "schedule", "schedule_action": "add"})
+        first_update = FakeUpdate("\u2b05\ufe0f \u041d\u0430\u0437\u0430\u0434 \u0432 \u043c\u0435\u043d\u044e", 200)
+        second_update = FakeUpdate("\u2b05\ufe0f \u041d\u0430\u0437\u0430\u0434 \u0432 \u043c\u0435\u043d\u044e", 200)
+
+        with patch.object(bot, "get_user_role", return_value="admin"), \
+             patch.object(bot, "get_employee_by_user_id", return_value=None):
+            # First press is handled by the active conversation fallback.
+            asyncio.run(bot.cancel(first_update, context))
+            self.assertEqual(first_update.message.replies[-1][0], "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043c. \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:")
+            self.assertEqual(context.user_data["menu_parent"], "main")
+
+            # After the conversation ends, the next press is handled globally.
+            asyncio.run(bot.button_handler(second_update, context))
+
+        self.assertEqual(second_update.message.replies[-1][0], "\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e:")
+        self.assertEqual(context.user_data["menu_parent"], "main")
 
     def test_cancel_from_top_level_submenu_returns_to_main_menu(self):
         """Проверяет возврат из корневого подменю в главное меню."""
@@ -149,6 +318,33 @@ class FollowupFixTests(unittest.TestCase):
         self.assertEqual(database.schedule_time_to_minutes("09:30"), 570)
         self.assertEqual(database.schedule_time_to_minutes("18:15"), 1095)
         self.assertIsNone(database.schedule_time_to_minutes("24:30", allow_24=True))
+
+
+    def test_weekly_and_monthly_reports_include_current_active_shift(self):
+        """An explicitly started active shift is counted up to the current moment in reports."""
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 13, 12, 30)
+
+        shifts = [{
+            "user_id": 202,
+            "shift_start": "2026-11-13 09:00:00",
+            "shift_end": None,
+            "status": "active",
+            "employee_name": "Ivan Ivanov",
+        }]
+        with patch.object(utils, "datetime", FixedDateTime), \
+             patch.object(utils, "get_all_shifts", return_value=shifts), \
+             patch.object(database, "get_employee_by_user_id", return_value=None), \
+             patch.object(config, "HOURLY_RATE", __import__("decimal").Decimal("167")):
+            weekly = utils.generate_weekly_report(today=__import__("datetime").date(2026, 11, 13))
+            monthly = utils.generate_monthly_report(today=__import__("datetime").date(2026, 11, 13))
+
+        for report in (weekly, monthly):
+            self.assertIn("3\u0447 30\u043c", report)
+            self.assertIn("585 \u0440\u0443\u0431.", report)
+            self.assertNotIn("\u0437\u0430\u043a\u0440\u044b\u0442\u044b\u0445 \u0441\u043c\u0435\u043d \u043d\u0435\u0442", report)
 
     def test_reports_include_individual_and_total_salary(self):
         """Проверяет личную оплату сотрудников и общий итог в отчетах."""

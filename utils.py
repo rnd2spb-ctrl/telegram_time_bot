@@ -80,12 +80,12 @@ def format_schedule_message():
     return message.rstrip()
 
 
-def _closed_shifts_between(start_date, end_date):
-    """Выбирает закрытые смены за период от start_date включительно до end_date не включительно."""
+def _shifts_between(start_date, end_date):
+    """Select closed and currently active shifts that started in the given period."""
     shifts = get_all_shifts(days=10**9)
     result = []
     for shift in shifts:
-        if shift.get("status") != "closed":
+        if shift.get("status") not in {"closed", "active"}:
             continue
         try:
             shift_date = datetime.strptime(
@@ -103,7 +103,7 @@ def generate_weekly_report(today=None):
     today = today or date.today()
     start_date = today - timedelta(days=today.weekday())
     end_date = start_date + timedelta(days=7)
-    shifts = _closed_shifts_between(start_date, end_date)
+    shifts = _shifts_between(start_date, end_date)
     period = (
         f"неделю ({start_date.strftime('%d.%m.%Y')}–"
         f"{(end_date - timedelta(days=1)).strftime('%d.%m.%Y')})"
@@ -119,7 +119,7 @@ def generate_monthly_report(today=None):
         end_date = date(start_date.year + 1, 1, 1)
     else:
         end_date = date(start_date.year, start_date.month + 1, 1)
-    shifts = _closed_shifts_between(start_date, end_date)
+    shifts = _shifts_between(start_date, end_date)
     period = f"месяц ({start_date.strftime('%m.%Y')})"
     return format_report(shifts, period)
 

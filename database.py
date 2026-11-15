@@ -335,8 +335,53 @@ def get_audit_log():
 
 
 # --- Фактические рабочие смены ---
+def auto_close_overdue_shifts(now=None):
+    """Закрывает незавершенные смены в 22:01 временем 21:00 даты их начала."""
+    now = now or datetime.now()
+    shifts = load_json("shifts.json")
+    closed_shifts = []
+
+    for shift in shifts:
+        if not isinstance(shift, dict) or shift.get("status") != "active":
+            continue
+        try:
+            started_at = datetime.strptime(
+                shift["shift_start"], "%Y-%m-%d %H:%M:%S"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        deadline = started_at.replace(hour=22, minute=1, second=0)
+        if now < deadline:
+            continue
+
+        fixed_end = started_at.replace(hour=21, minute=0, second=0)
+        shift["shift_end"] = fixed_end.strftime("%Y-%m-%d %H:%M:%S")
+        shift["status"] = "closed"
+        shift["auto_closed"] = True
+        closed_shifts.append(dict(shift))
+
+    if closed_shifts:
+        save_json("shifts.json", shifts)
+        for shift in closed_shifts:
+            log_action(
+                actor_user_id=None,
+                actor_role="system",
+                action="shift_auto_closed",
+                target_user_id=shift.get("user_id"),
+                details={
+                    "shift_start": shift.get("shift_start"),
+                    "shift_end": shift.get("shift_end"),
+                    "rule": "auto_close_at_22_01_to_21_00",
+                },
+            )
+
+    return closed_shifts
+
+
 def get_active_shift(user_id):
-    """Находит открытую смену пользователя."""
+    """Находит открытую смену с проверкой просрочки."""
+    auto_close_overdue_shifts()
     shifts = load_json("shifts.json")
     for shift in shifts:
         if shift.get("user_id") == user_id and shift.get("status") == "active":
@@ -346,6 +391,7 @@ def get_active_shift(user_id):
 
 def start_shift(user_id, employee_name=None):
     """Создает новую активную смену с текущим временем начала."""
+    auto_close_overdue_shifts()
     shifts = load_json("shifts.json")
     shift = {
         "user_id": user_id,
@@ -360,7 +406,8 @@ def start_shift(user_id, employee_name=None):
 
 
 def end_shift(user_id):
-    """Закрывает активную смену пользователя и сохраняет время окончания."""
+    """Закрывает смену фактическим временем до 22:01."""
+    auto_close_overdue_shifts()
     shifts = load_json("shifts.json")
     for shift in shifts:
         if shift.get("user_id") == user_id and shift.get("status") == "active":
@@ -795,7 +842,8 @@ def delete_schedule_entries(schedule_ids, actor_user_id, actor_role, owner_user_
 # Функции для отчетов
 # --- Выборка смен для расчетов ---
 def get_user_shifts(user_id, days=30):
-    """Возвращает недавние закрытые смены пользователя и его текущую активную смену."""
+    """Возвращает смены пользователя после проверки автозакрытия."""
+    auto_close_overdue_shifts()
     shifts = load_json("shifts.json")
     now = datetime.now()
     cutoff = now - timedelta(days=max(0, int(days)))
@@ -815,10 +863,11 @@ def get_user_shifts(user_id, days=30):
 
 
 def get_all_shifts(days=30):
-    """Возвращает последние закрытые смены всех пользователей."""
+    """Возвращает смены всех пользователей с проверкой автозакрытия."""
+    auto_close_overdue_shifts()
     shifts = load_json("shifts.json")
     recent_shifts = []
     for shift in shifts:
-        if shift.get("status") == "closed":
+        if shift.get("status") in {"closed", "active"}:
             recent_shifts.append(shift)
     return recent_shifts[-days:]
