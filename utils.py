@@ -81,11 +81,11 @@ def format_schedule_message():
 
 
 def _shifts_between(start_date, end_date):
-    """Select closed and currently active shifts that started in the given period."""
+    """Выбирает только закрытые смены, начавшиеся в указанном периоде."""
     shifts = get_all_shifts(days=10**9)
     result = []
     for shift in shifts:
-        if shift.get("status") not in {"closed", "active"}:
+        if shift.get("status") != "closed":
             continue
         try:
             shift_date = datetime.strptime(
@@ -153,6 +153,7 @@ def format_report(shifts, period):
         report += f"\U0001F464 {name}: {calculate_work_time(employee_shifts)} Сумма: {salary} руб.\n\n"
 
     if not user_shifts:
-        report += "За выбранный период закрытых смен нет.\n\n"
+        # Если завершённых смен нет, не выводим бессмысленный нулевой итог.
+        return f"📊 Отчет за {period}: завершенных смен нет."
     report += f"Итого общая сумма: {total_salary} руб."
     return report.rstrip()

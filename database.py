@@ -317,7 +317,7 @@ def update_employee(phone_number, first_name=None, last_name=None, new_phone=Non
 
 
 def dismiss_employee(phone_number, protected_user_id=None):
-    """Переводит сотрудника в статус dismissed без удаления истории."""
+    """Увольняет сотрудника, закрывает его активную смену и удаляет будущие назначения."""
     employees = load_json("employees.json")
     target = next(
         (item for item in employees
@@ -328,8 +328,96 @@ def dismiss_employee(phone_number, protected_user_id=None):
         return False, "not_found"
     if protected_user_id is not None and target.get("user_id") == protected_user_id:
         return False, "protected"
+
+    # Сначала проверяем расписание: при повреждённом файле не увольняем сотрудника
+    # частично и не оставляем его будущие назначения без возможности очистки.
+    schedule = _read_schedule_records()
+    if schedule is None:
+        return False, "schedule_data_invalid"
+
+    dismissed_at = datetime.now()
+    dismissed_at_text = dismissed_at.strftime("%Y-%m-%d %H:%M:%S")
+    user_id = target.get("user_id")
+    employee_id = f"phone:{normalize_phone(target.get('phone_number'))}"
+
+    # Закрываем все активные смены именно в момент увольнения, не применяя
+    # правило автоматического закрытия в 21:00.
+    shifts = load_json("shifts.json")
+    if not isinstance(shifts, list):
+        return False, "shift_data_invalid"
+
+    closed_shifts = []
+    if user_id is not None:
+        for shift in shifts:
+            if not isinstance(shift, dict):
+                continue
+            if shift.get("user_id") != user_id or shift.get("status") != "active":
+                continue
+            # Даже при некорректной записи время окончания фиксируем точно
+            # по моменту увольнения, а не переносим его на стандартные 21:00.
+            shift["shift_end"] = dismissed_at_text
+            shift["status"] = "closed"
+            shift["closed_on_dismissal"] = True
+            closed_shifts.append({
+                "shift_start": shift.get("shift_start"),
+                "shift_end": shift["shift_end"],
+            })
+
+    # Удаляем только назначения, которые ещё не закончились к моменту увольнения.
+    # Прошлые назначения сохраняем, как и отдельную историю фактически отработанных смен.
+    remaining_schedule = []
+    removed_schedule_ids = []
+    for entry in schedule:
+        belongs_to_employee = (
+            (user_id is not None and entry.get("user_id") == user_id)
+            or entry.get("employee_id") == employee_id
+        )
+        if not belongs_to_employee:
+            remaining_schedule.append(entry)
+            continue
+
+        try:
+            end_minutes = schedule_time_to_minutes(
+                entry["end_time"], allow_24=True
+            )
+            scheduled_end = (
+                datetime.strptime(entry["date"], "%Y-%m-%d")
+                + timedelta(minutes=end_minutes)
+            )
+        except (KeyError, TypeError, ValueError):
+            # Записи уже проверены _read_schedule_records; эта ветка защищает
+            # от неожиданного изменения данных между проверкой и очисткой.
+            remaining_schedule.append(entry)
+            continue
+
+        if scheduled_end <= dismissed_at:
+            remaining_schedule.append(entry)
+        else:
+            removed_schedule_ids.append(entry.get("id"))
+
+    # Сохраняем изменения фактических смен и расписания до смены статуса сотрудника.
+    if closed_shifts:
+        save_json("shifts.json", shifts)
+    if removed_schedule_ids:
+        save_json("schedule.json", remaining_schedule)
+
     target["status"] = "dismissed"
     save_json("employees.json", employees)
+
+    # Отдельная запись аудита помогает установить, какие смены и назначения
+    # были закрыты или удалены непосредственно при увольнении.
+    if closed_shifts or removed_schedule_ids:
+        log_action(
+            actor_user_id=None,
+            actor_role="system",
+            action="employee_dismissal_cleanup",
+            target_user_id=user_id,
+            details={
+                "closed_shifts": closed_shifts,
+                "removed_schedule_ids": removed_schedule_ids,
+                "dismissed_at": dismissed_at_text,
+            },
+        )
     return True, "ok"
 
 

@@ -761,7 +761,14 @@ async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_
         success, reason = dismiss_employee(phone, protected_user_id=config.OWNER_ID)
         if success:
             audit_action(update, 'employee_dismissed', target_user_id=selected_employee.get('user_id') if selected_employee else None, details={'employee_name': ' '.join((part for part in (selected_employee.get('last_name'), selected_employee.get('first_name')) if part)) if selected_employee else None, 'phone_number': phone})
-        result = '☠️ Сотрудник уволен. Запись и история смен сохранены.' if success else '❌ Не удалось уволить сотрудника.'
+        if success:
+            result = '☠️ Сотрудник уволен. Активная смена закрыта (если была), будущие назначения удалены, история закрытых смен сохранена.'
+        elif reason == 'schedule_data_invalid':
+            result = '❌ Файл расписания повреждён или содержит записи старого формата. Увольнение отменено, данные не изменены.'
+        elif reason == 'shift_data_invalid':
+            result = '❌ Файл учёта смен повреждён. Увольнение отменено, данные не изменены.'
+        else:
+            result = '❌ Не удалось уволить сотрудника.'
     else:
         success, reason = delete_employee_without_history(phone, protected_user_id=config.OWNER_ID)
         if success:
@@ -772,7 +779,7 @@ async def manage_employee_confirm(update: Update, context: ContextTypes.DEFAULT_
         elif reason == 'has_schedule':
             result = '❌ У сотрудника есть назначенные смены в расписании. Сначала измените или удалите их.'
         elif reason == 'schedule_data_invalid':
-            result = '❌ Файл расписания повреждён или содержит записи старого формата. Удаление сотрудника отменено.'
+            result = '❌ Файл расписания повреждён или содержит записи старого формата. Удаление записи отменено, данные не изменены.'
         else:
             result = '❌ Не удалось удалить запись сотрудника.'
     clear_manage_employee_state(context)

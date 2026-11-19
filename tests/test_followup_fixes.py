@@ -404,13 +404,8 @@ class FollowupFixTests(unittest.TestCase):
         self.assertIsNone(database.schedule_time_to_minutes("24:30", allow_24=True))
 
 
-    def test_weekly_and_monthly_reports_include_current_active_shift(self):
-        """An explicitly started active shift is counted up to the current moment in reports."""
-        class FixedDateTime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 11, 13, 12, 30)
-
+    def test_weekly_and_monthly_reports_exclude_current_active_shift(self):
+        """Недельный и месячный отчёты учитывают только закрытые смены."""
         shifts = [{
             "user_id": 202,
             "shift_start": "2026-11-13 09:00:00",
@@ -418,17 +413,14 @@ class FollowupFixTests(unittest.TestCase):
             "status": "active",
             "employee_name": "Ivan Ivanov",
         }]
-        with patch.object(utils, "datetime", FixedDateTime), \
-             patch.object(utils, "get_all_shifts", return_value=shifts), \
-             patch.object(database, "get_employee_by_user_id", return_value=None), \
-             patch.object(config, "HOURLY_RATE", __import__("decimal").Decimal("167")):
+        with patch.object(utils, "get_all_shifts", return_value=shifts):
             weekly = utils.generate_weekly_report(today=__import__("datetime").date(2026, 11, 13))
             monthly = utils.generate_monthly_report(today=__import__("datetime").date(2026, 11, 13))
 
         for report in (weekly, monthly):
-            self.assertIn("3\u0447 30\u043c", report)
-            self.assertIn("585 \u0440\u0443\u0431.", report)
-            self.assertNotIn("\u0437\u0430\u043a\u0440\u044b\u0442\u044b\u0445 \u0441\u043c\u0435\u043d \u043d\u0435\u0442", report)
+            self.assertIn("завершенных смен нет", report)
+            self.assertNotIn("Итого общая сумма", report)
+            self.assertNotIn("0 руб.", report)
 
     def test_reports_include_individual_and_total_salary(self):
         """Проверяет личную оплату сотрудников и общий итог в отчетах."""
