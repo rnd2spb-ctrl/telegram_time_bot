@@ -16,22 +16,18 @@ from test_admin_schedule_features import FakeContext, FakeUpdate
 
 class FollowupFixTests(unittest.TestCase):
     """Регрессионные проверки исправлений авторизации, смен, времени и отчетов."""
-    def test_first_unrecognized_message_starts_onboarding_and_next_phone_is_processed(self):
-        """Проверяет запуск идентификации и обработку следующего сообщения с телефоном."""
+    def test_unrecognized_user_needs_invite_and_phone_text_gives_no_access(self):
+        """Проверяет, что неопознанный пользователь получает просьбу о ссылке, а номер текстом доступа не даёт."""
         context = FakeContext()
-        first = FakeUpdate("Привет", 999)
-        with patch.object(bot, "get_employee_by_user_id", return_value=None), \
-             patch.object(bot, "get_user_role", return_value=None):
-            asyncio.run(bot.button_handler(first, context))
-        self.assertTrue(context.user_data["awaiting_phone"])
-        self.assertIn("Поделитесь", first.message.replies[-1][0])
+        for text in ("Привет", "+79990000099"):
+            update = FakeUpdate(text, 999)
+            with patch.object(bot, "get_employee_by_user_id", return_value=None), \
+                 patch.object(bot, "get_user_role", return_value=None), \
+                 patch.object(bot, "redeem_invite") as redeem:
+                asyncio.run(bot.button_handler(update, context))
+            self.assertIn("ссылка-приглашение", update.message.replies[-1][0])
+            redeem.assert_not_called()
 
-        second = FakeUpdate("+79990000099", 999)
-        with patch.object(bot, "get_employee_by_user_id", return_value=None), \
-             patch.object(bot, "get_user_role", return_value=None), \
-             patch.object(bot, "complete_phone_identification", new=AsyncMock()) as bind:
-            asyncio.run(bot.button_handler(second, context))
-        bind.assert_awaited_once_with(second, context, "+79990000099")
 
     def test_role_change_list_includes_unbound_and_linked_records(self):
         """Проверяет список сотрудников с привязанным и непривязанным Telegram."""
@@ -118,7 +114,7 @@ class FollowupFixTests(unittest.TestCase):
 
             before_cutoff = datetime(2026, 11, 15, 22, 0, 59)
             self.assertEqual(database.auto_close_overdue_shifts(now=before_cutoff), [])
-            self.assertIsNotNone(database.get_active_shift(201))
+            self.assertEqual(database.load_json("shifts.json")[0]["status"], "active")
 
             at_cutoff = datetime(2026, 11, 15, 22, 1, 0)
             # Use the explicit time for the closure decision and inspect persisted data.
@@ -215,6 +211,93 @@ class FollowupFixTests(unittest.TestCase):
             self.assertEqual(saved["status"], "closed")
             self.assertEqual(saved["shift_end"], "2026-11-15 21:00:00")
             self.assertTrue(saved["auto_closed"])
+
+    def test_delete_schedule_employee_list_uses_blank_lines(self):
+        """The delete-shift employee list separates its title and item by a blank line."""
+        entry = {
+            "id": "delete-entry-1",
+            "date": "2026-11-15",
+            "employee_id": "phone:79043405112",
+            "user_id": 201,
+            "employee_name": "\u0410\u0440\u0442\u0435\u043c \u0410\u0440\u0442\u0435\u043c",
+            "employee_phone": "+79043405112",
+            "start_time": "15:00",
+            "end_time": "21:00",
+        }
+        employee = {"user_id": 201, "phone_number": "+79043405112", "role": "admin", "status": "active"}
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 15, 12, 0)
+
+        update = FakeUpdate("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443", 200)
+        context = FakeContext()
+        with patch.object(bot, "require_admin", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "get_user_role", return_value="admin"), \
+             patch.object(bot, "_manageable_schedule_entries", return_value=[entry]), \
+             patch.object(bot, "get_all_employees", return_value=[employee]), \
+             patch.object(bot, "datetime", FixedDateTime), \
+             patch.object(bot.config, "OWNER_ID", 100):
+            state = asyncio.run(bot.schedule_menu_action(update, context))
+
+        self.assertEqual(state, bot.GET_SCHEDULE_EMPLOYEE)
+        self.assertEqual(
+            update.message.replies[-1][0],
+            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430, \u0447\u044c\u0438 \u0441\u043c\u0435\u043d\u044b \u043d\u0443\u0436\u043d\u043e \u0443\u0434\u0430\u043b\u0438\u0442\u044c:\n\n"
+            "1. \u0410\u0440\u0442\u0435\u043c \u0410\u0440\u0442\u0435\u043c (\u0430\u0434\u043c\u0438\u043d) \u2014 +79043405112",
+        )
+
+
+    def test_edit_schedule_list_uses_blank_lines_between_entries(self):
+        """The edit-shift list separates its title and every shift with blank lines."""
+        entries = [
+            {
+                "id": "edit-entry-1",
+                "date": "2026-11-15",
+                "employee_id": "phone:79043405112",
+                "user_id": 201,
+                "employee_name": "\u0410\u0440\u0442\u0435\u043c",
+                "employee_phone": "+79043405112",
+                "start_time": "15:00",
+                "end_time": "21:00",
+            },
+            {
+                "id": "edit-entry-2",
+                "date": "2026-11-16",
+                "employee_id": "phone:79043405113",
+                "user_id": 202,
+                "employee_name": "\u0421\u0443\u0445\u043e\u0432\u0435\u0435\u0432",
+                "employee_phone": "+79043405113",
+                "start_time": "09:00",
+                "end_time": "21:00",
+            },
+        ]
+        labels = ["\u0410\u0440\u0442\u0435\u043c (\u0430\u0434\u043c\u0438\u043d) >", "\u0421\u0443\u0445\u043e\u0432\u0435\u0435\u0432 (\u0430\u0434\u043c\u0438\u043d) >"]
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 15, 12, 0)
+
+        update = FakeUpdate("\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043c\u0435\u043d\u0443", 200)
+        context = FakeContext()
+        with patch.object(bot, "require_admin", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "get_user_role", return_value="admin"), \
+             patch.object(bot, "_manageable_schedule_entries", return_value=entries), \
+             patch.object(bot, "schedule_entry_prompt_label", side_effect=labels), \
+             patch.object(bot, "datetime", FixedDateTime), \
+             patch.object(bot.config, "OWNER_ID", 100):
+            state = asyncio.run(bot.schedule_menu_action(update, context))
+
+        self.assertEqual(state, bot.SCHEDULE_SELECT_ENTRY)
+        self.assertEqual(
+            update.message.replies[-1][0],
+            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u043c\u0435\u043d\u0443, \u0432\u0432\u0435\u0434\u044f \u0435\u0451 \u043d\u043e\u043c\u0435\u0440:\n\n"
+            "1. \u0410\u0440\u0442\u0435\u043c (\u0430\u0434\u043c\u0438\u043d) > \u2014 2026-11-15 \u2014 15:00\u201321:00\n\n"
+            "2. \u0421\u0443\u0445\u043e\u0432\u0435\u0435\u0432 (\u0430\u0434\u043c\u0438\u043d) > \u2014 2026-11-16 \u2014 09:00\u201321:00",
+        )
+
 
     def test_schedule_time_normalizer_accepts_hours_and_minutes(self):
         """Проверяет ввод целых часов и времени с минутами через двоеточие и дефис."""
